@@ -1,6 +1,6 @@
 ﻿# ============================================================
 #  Criação de Máquina Virtual no Hyper-V
-#  Ambiente: Windows Server 2019
+#  Ambiente: A partir do Windows Server 2019 ou superior
 #  v3.1 — Correção do template de Secure Boot
 # ============================================================
 
