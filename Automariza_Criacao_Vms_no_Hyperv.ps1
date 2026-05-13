@@ -83,7 +83,7 @@ New-VHD -Path $VHDXPath `
 Write-Host "[OK] Disco VHDX criado: $VHDXPath" -ForegroundColor Green
 
 # ============================================================
-# 4. Criar a Máquina Virtual (sem NIC padrão)
+# 4. Criar a Máquina Virtual e remover o adaptador de rede padrão
 # ============================================================
 New-VM -Name $VMName `
        -Generation $Generation `
@@ -92,6 +92,12 @@ New-VM -Name $VMName `
        -NoVHD | Out-Null
 
 Write-Host "[OK] VM '$VMName' criada (Geração $Generation)" -ForegroundColor Green
+
+# O New-VM sempre cria um adaptador "Network Adapter" padrão; removê-lo
+# para que a VM fique apenas com o adaptador personalizado (vNIC1)
+Get-VMNetworkAdapter -VMName $VMName | Remove-VMNetworkAdapter
+
+Write-Host "[OK] Adaptador de rede padrão removido" -ForegroundColor Green
 
 # ============================================================
 # 5. Configurar vCPUs
