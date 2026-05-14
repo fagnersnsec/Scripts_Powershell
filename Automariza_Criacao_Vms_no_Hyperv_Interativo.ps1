@@ -14,7 +14,7 @@ Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
 do {
-    $VMName = (Read-Host "  >> Informe o Nome da Máquina Virtual").Trim()
+    $VMName = (Read-Host "  >> Informe o Nome da Maquina Virtual").Trim()
 
     if ([string]::IsNullOrWhiteSpace($VMName)) {
         Write-Host "  [AVISO] O nome não pode ser vazio. Tente novamente." -ForegroundColor Yellow
@@ -39,7 +39,7 @@ $ISODir     = "E:\ISOS"
 # ============================================================
 # 0.1 Seleção interativa do Switch Virtual
 # ============================================================
-Write-Host "  --- Switches Virtuais disponíveis no servidor Hyper-V ---" -ForegroundColor Cyan
+Write-Host "  --- Switches Virtuais disponiveis no servidor Hyper-V ---" -ForegroundColor Cyan
 
 $Switches = @(Get-VMSwitch | Sort-Object Name)
 
@@ -55,7 +55,7 @@ for ($i = 0; $i -lt $Switches.Count; $i++) {
 }
 
 do {
-    $opcao  = (Read-Host "  >> Selecione o número do Switch Virtual desejado").Trim()
+    $opcao  = (Read-Host "  >> Selecione o numero do Switch Virtual desejado").Trim()
     $valido = $false
 
     if ($opcao -match '^\d+$') {
@@ -80,7 +80,7 @@ Write-Host ""
 Write-Host "  --- ISOs disponíveis em '$ISODir' ---" -ForegroundColor Cyan
 
 if (-not (Test-Path $ISODir)) {
-    Write-Host "  [ERRO] Diretório de ISOs não encontrado: $ISODir" -ForegroundColor Red
+    Write-Host "  [ERRO] Diretório de ISOs nao encontrado: $ISODir" -ForegroundColor Red
     Write-Host "         Ajuste a variável \$ISODir no script e tente novamente." -ForegroundColor Red
     exit 1
 }
