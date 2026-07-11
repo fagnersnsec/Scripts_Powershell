@@ -2,7 +2,11 @@
 #  Administração de VLANs em Ambientes Hyper-V
 #  Ambiente : Windows Server 2019 ou superior
 #  Autor    : Fagner Nascimento — Especialista Microsoft Datacenter
-#  Versão   : 1.2 — Adicionada Opção 5: Renomear Adaptador de rede da VM
+#  Versão   : 1.4 — Opção 2 agora permite ACRESCENTAR VLANs à lista
+#             atual (sem sobrescrever) ou substituir tudo; entrada de
+#             VLANs passa a aceitar faixas (ex: 4-10,70-71).
+#             v1.3 — Opção 6: Consultar VLANs de um Adaptador específico
+#             + exibição automática das VLANs atuais nas Opções 2 e 4.
 # ============================================================
 
 # ============================================================
@@ -54,12 +58,62 @@ function Select-FromList {
 }
 
 # ------------------------------------------------------------
-# Valida se a string contém apenas IDs de VLAN separados por vírgula
+# Valida se a string contém IDs de VLAN (individuais ou faixas)
+# separados por vírgula. Ex.: 10,20,30  ou  4-10,12-15,70-71,133
 # ------------------------------------------------------------
 function Validate-VlanList {
     param([string]$Entrada)
-    $padrao = '^(\d{1,4})(,\d{1,4})*$'
+    $padrao = '^\s*\d{1,4}(-\d{1,4})?(\s*,\s*\d{1,4}(-\d{1,4})?)*\s*$'
     return $Entrada.Trim() -match $padrao
+}
+
+# ------------------------------------------------------------
+# Expande uma lista de VLANs (com faixas) em um array de inteiros
+# ordenado e sem duplicatas. Ex.: "4-6,10" -> 4,5,6,10
+# ------------------------------------------------------------
+function Expand-VlanList {
+    param([string]$Entrada)
+    $ids = New-Object System.Collections.Generic.List[int]
+    foreach ($parte in ($Entrada -split ',')) {
+        $parte = $parte.Trim()
+        if ($parte -match '^(\d{1,4})-(\d{1,4})$') {
+            $ini = [int]$Matches[1]
+            $fim = [int]$Matches[2]
+            if ($ini -gt $fim) { $tmp = $ini; $ini = $fim; $fim = $tmp }
+            for ($n = $ini; $n -le $fim; $n++) { $ids.Add($n) }
+        } elseif ($parte -match '^\d{1,4}$') {
+            $ids.Add([int]$parte)
+        }
+    }
+    return @($ids | Sort-Object -Unique)
+}
+
+# ------------------------------------------------------------
+# Compacta um array de inteiros em uma string de VLANs com faixas.
+# Ex.: 4,5,6,10 -> "4-6,10"
+# ------------------------------------------------------------
+function Compress-VlanList {
+    param([int[]]$Ids)
+    $ordenados = @($Ids | Sort-Object -Unique)
+    if ($ordenados.Count -eq 0) { return "" }
+
+    $resultado = @()
+    $ini = $ordenados[0]
+    $ant = $ordenados[0]
+
+    for ($i = 1; $i -lt $ordenados.Count; $i++) {
+        $n = $ordenados[$i]
+        if ($n -eq $ant + 1) {
+            $ant = $n
+            continue
+        }
+        $resultado += if ($ini -eq $ant) { "$ini" } else { "$ini-$ant" }
+        $ini = $n
+        $ant = $n
+    }
+    $resultado += if ($ini -eq $ant) { "$ini" } else { "$ini-$ant" }
+
+    return ($resultado -join ',')
 }
 
 # ------------------------------------------------------------
@@ -112,7 +166,7 @@ function Read-VlanList {
     do {
         Write-Host ""
         Write-Host "  $Mensagem" -ForegroundColor Yellow
-        Write-Host "  Exemplo: 10,20,30,40,60" -ForegroundColor DarkGray
+        Write-Host "  Exemplo: 10,20,30,40,60  |  faixas: 4-10,12-15,70-71" -ForegroundColor DarkGray
         $entrada = (Read-Host "  >> VLANs").Trim()
 
         if (-not (Validate-VlanList $entrada)) {
@@ -120,6 +174,42 @@ function Read-VlanList {
         }
     } while (-not (Validate-VlanList $entrada))
     return $entrada
+}
+
+# ------------------------------------------------------------
+# Exibe as VLANs configuradas atualmente em um único adaptador
+# ------------------------------------------------------------
+function Show-AdapterVlanInfo {
+    param(
+        [string]$VMName,
+        [string]$AdapterName
+    )
+
+    try {
+        $vlan = Get-VMNetworkAdapterVlan -VMName $VMName -VMNetworkAdapterName $AdapterName
+
+        Write-Host ""
+        Write-Host "  ── VLANs atuais — VM: $VMName | Adaptador: $AdapterName ──" -ForegroundColor DarkCyan
+        Write-Host "  Modo             : $($vlan.OperationMode)" -ForegroundColor White
+
+        switch ($vlan.OperationMode) {
+            "Access" {
+                Write-Host "  VLAN de Acesso   : $($vlan.AccessVlanId)" -ForegroundColor White
+            }
+            "Trunk" {
+                Write-Host "  VLAN Nativa      : $($vlan.NativeVlanId)"            -ForegroundColor White
+                Write-Host "  VLANs Permitidas : $($vlan.AllowedVlanIdListString)" -ForegroundColor White
+            }
+            default {
+                Write-Host "  (Sem VLAN configurada / modo Untagged)" -ForegroundColor DarkGray
+            }
+        }
+
+        Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkCyan
+    } catch {
+        Write-Host ""
+        Write-Host "  [AVISO] Não foi possível obter as VLANs atuais: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 }
 
 # ------------------------------------------------------------
@@ -226,16 +316,72 @@ function Set-VlanOnExistingAdapter {
     if (-not $adapterNames) { return }
     $adapterEscolhido = Select-FromList -Titulo "Selecione o Adaptador de Rede:" -Itens $adapterNames
 
-    # Coletar VLANs e VLAN nativa
-    $vlanList   = Read-VlanList  "Digite os IDs de VLAN que deseja taguear neste adaptador (Trunk):"
-    $vlanNativa = Read-SingleVlan "Informe o ID da VLAN Nativa (NativeVlanId):"
+    # Exibir VLANs atualmente configuradas neste adaptador
+    Show-AdapterVlanInfo -VMName $vmEscolhida -AdapterName $adapterEscolhido
+
+    # Obter configuração atual para permitir ACRESCENTAR sem sobrescrever
+    try {
+        $vlanAtual = Get-VMNetworkAdapterVlan -VMName $vmEscolhida `
+                                              -VMNetworkAdapterName $adapterEscolhido
+    } catch {
+        Write-Host "  [ERRO] $($_.Exception.Message)" -ForegroundColor Red
+        return
+    }
+
+    $ehTrunk        = $vlanAtual.OperationMode -eq "Trunk"
+    $vlansAtuaisArr = if ($ehTrunk) { @($vlanAtual.AllowedVlanIdList) } else { @() }
+
+    # Escolher o modo de aplicação
+    Write-Host ""
+    Write-Host "  Como deseja aplicar as VLANs?" -ForegroundColor Yellow
+    Write-Host "  $("-" * 30)" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  [A]  Acrescentar VLAN(s) — mantém as existentes e soma as novas" -ForegroundColor White
+    Write-Host "  [S]  Substituir toda a lista — redefine as VLANs do zero"        -ForegroundColor White
+    Write-Host ""
+
+    do {
+        $modo = (Read-Host "  >> Digite A ou S").Trim().ToUpper()
+        if ($modo -ne "A" -and $modo -ne "S") {
+            Write-Host "  [AVISO] Opção inválida. Digite 'A' para acrescentar ou 'S' para substituir." -ForegroundColor Yellow
+        }
+    } while ($modo -ne "A" -and $modo -ne "S")
+
+    if ($modo -eq "A") {
+        # ── Modo ACRESCENTAR ─────────────────────────────────────
+        $novasEntrada = Read-VlanList "Digite a(s) VLAN(s) que deseja ACRESCENTAR à lista atual:"
+        $novasArr     = Expand-VlanList $novasEntrada
+
+        $listaFinalArr = @($vlansAtuaisArr + $novasArr | Sort-Object -Unique)
+        $vlanList      = Compress-VlanList $listaFinalArr
+
+        # Mantém a VLAN nativa atual se já for Trunk; caso contrário, solicita
+        if ($ehTrunk) {
+            $vlanNativa = $vlanAtual.NativeVlanId
+        } else {
+            $vlanNativa = Read-SingleVlan "Informe o ID da VLAN Nativa (NativeVlanId):"
+        }
+
+        # Destaca somente as VLANs que serão realmente adicionadas
+        $realmenteNovas = @($novasArr | Where-Object { $_ -notin $vlansAtuaisArr }) | Sort-Object -Unique
+        $vlanNovasTexto = if ($realmenteNovas.Count -gt 0) { Compress-VlanList $realmenteNovas } else { "(nenhuma — já existiam)" }
+    } else {
+        # ── Modo SUBSTITUIR ──────────────────────────────────────
+        $vlanList   = Read-VlanList  "Digite os IDs de VLAN que deseja taguear neste adaptador (Trunk):"
+        $vlanNativa = Read-SingleVlan "Informe o ID da VLAN Nativa (NativeVlanId):"
+    }
 
     # Confirmação
     Write-Host ""
     Write-Host "  ── Resumo da operação ──────────────────────────────────" -ForegroundColor DarkCyan
     Write-Host "  VM               : $vmEscolhida"          -ForegroundColor White
     Write-Host "  Adaptador        : $adapterEscolhido"      -ForegroundColor White
-    Write-Host "  VLANs (Trunk)    : $vlanList"              -ForegroundColor White
+    Write-Host "  Ação             : $(if ($modo -eq 'A') { 'Acrescentar VLANs' } else { 'Substituir lista' })" -ForegroundColor White
+    if ($modo -eq "A") {
+        Write-Host "  VLANs atuais     : $($vlanAtual.AllowedVlanIdListString)" -ForegroundColor White
+        Write-Host "  VLANs a adicionar: $vlanNovasTexto"     -ForegroundColor White
+    }
+    Write-Host "  VLANs (resultado): $vlanList"              -ForegroundColor White
     Write-Host "  VLAN Nativa      : $vlanNativa"            -ForegroundColor White
     Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkCyan
     Write-Host ""
@@ -325,6 +471,9 @@ function Set-AccessVlan {
     $adapterNames = Get-AdapterNames -VMName $vmEscolhida
     if (-not $adapterNames) { return }
     $adapterEscolhido = Select-FromList -Titulo "Selecione o Adaptador de Rede:" -Itens $adapterNames
+
+    # Exibir VLANs atualmente configuradas neste adaptador
+    Show-AdapterVlanInfo -VMName $vmEscolhida -AdapterName $adapterEscolhido
 
     # ID da VLAN de acesso
     $vlanAcesso = Read-SingleVlan "Informe o ID da VLAN de Acesso (Access):"
@@ -466,6 +615,27 @@ function Rename-VMAdapter {
 }
 
 # ============================================================
+#  OPÇÃO 6 — Consultar VLANs de um Adaptador específico
+# ============================================================
+function Show-SingleAdapterVlan {
+    Show-Header
+    Write-Host "  [ OPÇÃO 6 ] Consultar VLANs de um Adaptador específico" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Selecionar VM
+    $vmNames = Get-VMNames
+    if (-not $vmNames) { return }
+    $vmEscolhida = Select-FromList -Titulo "Selecione a Máquina Virtual:" -Itens $vmNames
+
+    # Selecionar adaptador
+    $adapterNames = Get-AdapterNames -VMName $vmEscolhida
+    if (-not $adapterNames) { return }
+    $adapterEscolhido = Select-FromList -Titulo "Selecione o Adaptador de Rede:" -Itens $adapterNames
+
+    Show-AdapterVlanInfo -VMName $vmEscolhida -AdapterName $adapterEscolhido
+}
+
+# ============================================================
 #  MENU PRINCIPAL
 # ============================================================
 do {
@@ -478,6 +648,7 @@ do {
     Write-Host "  [3]  Visualizar VLANs das Máquinas Virtuais"                 -ForegroundColor White
     Write-Host "  [4]  Configurar VLAN de Acesso em adaptador (Access)"        -ForegroundColor White
     Write-Host "  [5]  Renomear Adaptador de rede da VM"                        -ForegroundColor White
+    Write-Host "  [6]  Consultar VLANs de um Adaptador específico"               -ForegroundColor White
     Write-Host "  [0]  Sair"                                                    -ForegroundColor DarkGray
     Write-Host ""
 
@@ -489,6 +660,7 @@ do {
         "3" { Show-VlanInfo             }
         "4" { Set-AccessVlan            }
         "5" { Rename-VMAdapter          }
+        "6" { Show-SingleAdapterVlan    }
         "0" {
             Write-Host ""
             Write-Host "  Encerrando o script. Até logo!" -ForegroundColor Cyan
