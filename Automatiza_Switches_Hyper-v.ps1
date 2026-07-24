@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  Automatiza a Criação e Gestão de Switches Virtuais no Hyper-V
 #  Ambiente : Windows Server 2019 ou superior / Windows 10+ com Hyper-V
 #  Autor    : Fagner Nascimento — Especialista Microsoft Datacenter
