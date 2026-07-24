@@ -82,6 +82,23 @@ Ao criar ou editar scripts, mantenha o padrão já estabelecido:
 - Nomes de função no padrão **Verbo-Substantivo** aprovado do PowerShell
   (`Get-`, `Set-`, `Add-`, `Show-`, `Read-`, etc.).
 
+### Encoding dos arquivos (OBRIGATÓRIO)
+
+**Salve todo arquivo `.ps1` como UTF-8 COM BOM.** O ambiente de execução é o
+**Windows PowerShell 5.1**, que lê `.ps1` sem BOM como ANSI (Windows-1252) e
+**corrompe acentos e o traço longo `—`** — o `—` vira a sequência `â€"`, cuja
+aspa quebra as strings e dispara erros de parser em cascata (inclusive
+`StreamAlreadyRedirected` em prompts com `>>`).
+
+- Todos os scripts do repositório usam **UTF-8 com BOM** (bytes iniciais
+  `EF BB BF`). Mantenha esse padrão ao criar ou editar qualquer script.
+- Como verificar/corrigir neste ambiente (macOS):
+  - Verificar: `file arquivo.ps1` deve indicar `UTF-8 (with BOM)`; ou
+    `xxd arquivo.ps1 | head -1` deve começar com `efbb bf`.
+  - Adicionar BOM: `printf '\xEF\xBB\xBF' | cat - arquivo.ps1 > tmp && mv tmp arquivo.ps1`
+- Ao terminar de criar/editar um `.ps1`, **confirme que o BOM está presente**
+  antes de considerar a tarefa concluída.
+
 ## Validação de scripts
 
 Os scripts destinam-se a **Windows Server 2019+ com Hyper-V** e dependem de
