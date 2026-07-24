@@ -55,6 +55,9 @@ VLANs, não acrescenta).
 - `Automatiza_Criacao_Gerencia_de_Vlans_no_Hyperv_v2.ps1` — gestão interativa de
   VLANs em Hyper-V (adicionar/configurar VLANs trunk e access, acrescentar vs.
   substituir, consultar VLANs, renomear adaptadores).
+- `Automatiza_Switches_Hyper-v.ps1` — criação e gestão interativa de switches
+  virtuais (Externo/Interno/Privado), criação de switch NAT (internet para VMs
+  via WinNAT), listagem e remoção com limpeza do NAT associado.
 - `Automariza_Criacao_Vms_no_Hyperv.ps1` — criação de VMs no Hyper-V.
 - `Automariza_Criacao_Vms_no_Hyperv_Interativo.ps1` — versão interativa da criação de VMs.
 - `Inventario_de_Maquinas_Virtuais.ps1` — inventário de VMs com geração de relatório HTML.
