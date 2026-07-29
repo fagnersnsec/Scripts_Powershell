@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  Inventario de Maquinas Virtuais - Hyper-V
 #  Ambiente: Windows Server 2019 ou superior / Hyper-V instalado
 #  v1.1 - Relatorio HTML5 gerado localmente
