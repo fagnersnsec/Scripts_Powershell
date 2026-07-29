@@ -1,8 +1,89 @@
-# ============================================================
+﻿# ============================================================
 #  Criação de Máquina Virtual no Hyper-V
 #  Ambiente: A partir do Windows Server 2019 ou superior
 #  v4.0 — Seleção interativa de Switch Virtual e ISO
+#  v4.1 — Opção de habilitar Virtualização Aninhada (Nested)
 # ============================================================
+
+# ============================================================
+# Funções auxiliares
+# ============================================================
+function Read-Confirmacao {
+    <#
+        Pergunta (S/N) com reprompt e valor padrão aplicado ao ENTER vazio.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Pergunta,
+        [ValidateSet('S', 'N')][string]$Padrao = 'N'
+    )
+
+    $sufixo = if ($Padrao -eq 'S') { '(S/n)' } else { '(s/N)' }
+
+    while ($true) {
+        $resposta = (Read-Host "  >> $Pergunta $sufixo").Trim().ToUpper()
+
+        if ([string]::IsNullOrWhiteSpace($resposta)) { return ($Padrao -eq 'S') }
+        if ($resposta -eq 'S') { return $true }
+        if ($resposta -eq 'N') { return $false }
+
+        Write-Host "  [AVISO] Resposta inválida. Informe 'S' ou 'N'." -ForegroundColor Yellow
+    }
+}
+
+function Test-NestedVirtualizationSupport {
+    <#
+        Avalia os pré-requisitos do HOST para Virtualização Aninhada.
+        Fonte oficial:
+        https://learn.microsoft.com/windows-server/virtualization/hyper-v/enable-nested-virtualization
+          - Intel (VT-x + EPT) : host Windows Server 2016+ / Windows 10+, versão de configuração da VM >= 8.0
+          - AMD (EPYC/Ryzen+)  : host Windows Server 2022+ / Windows 11+, versão de configuração da VM >= 9.3
+    #>
+    $resultado = [pscustomobject]@{
+        Suportado      = $false
+        Fabricante     = 'Desconhecido'
+        BuildHost      = 0
+        VersaoMinimaVM = '8.0'
+        Motivo         = ''
+    }
+
+    try {
+        $cpu   = Get-CimInstance -ClassName Win32_Processor       -ErrorAction Stop | Select-Object -First 1
+        $build = [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).BuildNumber
+
+        $resultado.Fabricante = $cpu.Manufacturer
+        $resultado.BuildHost  = $build
+
+        switch -Wildcard ($cpu.Manufacturer) {
+            '*Intel*' {
+                $resultado.VersaoMinimaVM = '8.0'
+                if ($build -ge 14393) {
+                    $resultado.Suportado = $true
+                    $resultado.Motivo    = "CPU Intel e host build $build (Windows Server 2016+ / Windows 10+)."
+                } else {
+                    $resultado.Motivo    = "CPU Intel, porém o host build $build é anterior ao Windows Server 2016."
+                }
+            }
+            '*AMD*' {
+                # AMD exige host bem mais novo que Intel — build 20348 = Windows Server 2022
+                $resultado.VersaoMinimaVM = '9.3'
+                if ($build -ge 20348) {
+                    $resultado.Suportado = $true
+                    $resultado.Motivo    = "CPU AMD e host build $build (Windows Server 2022+ / Windows 11+)."
+                } else {
+                    $resultado.Motivo    = "CPU AMD exige host Windows Server 2022+ / Windows 11+ (build 20348 ou superior); host atual: build $build."
+                }
+            }
+            default {
+                $resultado.Motivo = "Fabricante de CPU não reconhecido: '$($cpu.Manufacturer)'."
+            }
+        }
+    }
+    catch {
+        $resultado.Motivo = "Não foi possível consultar o hardware do host: $($_.Exception.Message)"
+    }
+
+    return $resultado
+}
 
 # ============================================================
 # 0. Solicitar o Nome da VM ao operador
@@ -120,6 +201,36 @@ Write-Host "  ISO selecionada: '$ISOPath'" -ForegroundColor Green
 Write-Host ""
 
 # ============================================================
+# 0.25 Virtualização Aninhada (Nested Virtualization)
+# ============================================================
+Write-Host "  --- Virtualização Aninhada (Nested) ---" -ForegroundColor Cyan
+Write-Host "  Permite executar Hyper-V, WSL2, Sandbox ou containers Hyper-V DENTRO desta VM." -ForegroundColor DarkGray
+Write-Host "  Pré-requisitos da VM (Geração 2, memória dinâmica off, 2+ vCPUs) já são atendidos." -ForegroundColor DarkGray
+Write-Host ""
+
+$suporteNested = Test-NestedVirtualizationSupport
+
+if ($suporteNested.Suportado) {
+    Write-Host "  [OK] Host compatível. $($suporteNested.Motivo)" -ForegroundColor Green
+} else {
+    Write-Host "  [AVISO] $($suporteNested.Motivo)" -ForegroundColor Yellow
+    Write-Host "          Habilitar mesmo assim pode falhar ao aplicar ou ao iniciar a VM." -ForegroundColor Yellow
+}
+
+Write-Host ""
+$EnableNested      = Read-Confirmacao -Pergunta "Deseja habilitar a Virtualização Aninhada nesta VM?" -Padrao 'N'
+$EnableMacSpoofing = $false
+
+if ($EnableNested) {
+    Write-Host ""
+    Write-Host "  [AVISO] Sem MAC Address Spoofing, as VMs criadas DENTRO desta VM não" -ForegroundColor Yellow
+    Write-Host "          conseguem trafegar pela rede através do switch do host." -ForegroundColor Yellow
+    $EnableMacSpoofing = Read-Confirmacao -Pergunta "Habilitar MAC Address Spoofing no adaptador '$NICName'?" -Padrao 'S'
+}
+
+Write-Host ""
+
+# ============================================================
 # 0.3 Resumo e confirmação antes de criar a VM
 # ============================================================
 Write-Host "  ============================================" -ForegroundColor Cyan
@@ -132,6 +243,8 @@ Write-Host "    Memória RAM.....: $([int]($MemoryRAM/1GB)) GB"
 Write-Host "    vCPUs...........: $vCPU"
 Write-Host "    Disco VHDX......: $([int]($DiskSize/1GB)) GB"
 Write-Host "    Diretório VMs...: $VMPath"
+Write-Host "    Virt. Aninhada..: $(if ($EnableNested) { 'SIM' } else { 'NAO' })"
+Write-Host "    MAC Spoofing....: $(if ($EnableMacSpoofing) { 'ON' } else { 'OFF' })"
 Write-Host ""
 
 $confirmacao = Read-Host "  >> Confirma a criação da VM '$VMName'? (S/N)"
@@ -204,6 +317,43 @@ Set-VMProcessor -VMName $VMName `
 Write-Host "[OK] vCPUs configuradas: $vCPU" -ForegroundColor Green
 
 # ============================================================
+# 5.1 Habilitar Virtualização Aninhada (Nested Virtualization)
+#     A VM PRECISA estar desligada — este é o momento correto, antes do Start-VM.
+#     Fonte: https://learn.microsoft.com/windows-server/virtualization/hyper-v/enable-nested-virtualization
+# ============================================================
+if ($EnableNested) {
+    try {
+        Set-VMProcessor -VMName $VMName `
+                        -ExposeVirtualizationExtensions $true `
+                        -ErrorAction Stop
+
+        # Releitura para confirmar que a propriedade realmente ficou ativa
+        $nestedAtivo = (Get-VMProcessor -VMName $VMName).ExposeVirtualizationExtensions
+        $versaoVM    = (Get-VM -Name $VMName).Version
+
+        if ($nestedAtivo) {
+            Write-Host "[OK] Virtualização Aninhada habilitada (versão de configuração da VM: $versaoVM)" -ForegroundColor Green
+        } else {
+            Write-Host "[AVISO] O comando foi aceito, mas a propriedade não ficou ativa." -ForegroundColor Yellow
+            $EnableNested = $false
+        }
+
+        if ([version]$versaoVM -lt [version]$suporteNested.VersaoMinimaVM) {
+            Write-Host "[AVISO] Versão de configuração $versaoVM é inferior à mínima $($suporteNested.VersaoMinimaVM) exigida para esta CPU." -ForegroundColor Yellow
+            Write-Host "        Atualize com: Update-VMVersion -Name '$VMName'" -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "[ERRO] Falha ao habilitar a Virtualização Aninhada: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "       A VM continuará sendo criada SEM o recurso." -ForegroundColor Yellow
+        $EnableNested      = $false
+        $EnableMacSpoofing = $false
+    }
+} else {
+    Write-Host "[OK] Virtualização Aninhada não solicitada (mantida desabilitada)" -ForegroundColor DarkGray
+}
+
+# ============================================================
 # 6. Desabilitar memória dinâmica e fixar em 4 GB
 # ============================================================
 Set-VMMemory -VMName $VMName `
@@ -247,6 +397,25 @@ Add-VMNetworkAdapter -VMName $VMName `
                      -SwitchName $SwitchName
 
 Write-Host "[OK] Adaptador '$NICName' vinculado ao switch '$SwitchName'" -ForegroundColor Green
+
+# ============================================================
+# 9.1 MAC Address Spoofing — obrigatório para que as VMs aninhadas
+#     consigam trafegar na rede através do switch virtual do host
+# ============================================================
+if ($EnableMacSpoofing) {
+    try {
+        Set-VMNetworkAdapter -VMName $VMName `
+                             -Name $NICName `
+                             -MacAddressSpoofing On `
+                             -ErrorAction Stop
+
+        Write-Host "[OK] MAC Address Spoofing habilitado no adaptador '$NICName'" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "[AVISO] Não foi possível habilitar o MAC Address Spoofing: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "        As VMs aninhadas podem ficar sem acesso à rede." -ForegroundColor Yellow
+    }
+}
 
 # ============================================================
 # 10. Habilitar Secure Boot com template correto para Windows
@@ -301,6 +470,9 @@ Write-Host "============================================" -ForegroundColor Cyan
 Get-VM -Name $VMName | Select-Object Name, Generation, State,
     @{N="RAM (GB)";  E={ [math]::Round($_.MemoryAssigned/1GB,0) }},
     @{N="vCPUs";     E={ $_.ProcessorCount }},
+    @{N="Virt. Aninhada"; E={
+        if ((Get-VMProcessor -VMName $_.Name).ExposeVirtualizationExtensions) { "Habilitada" } else { "Desabilitada" }
+    }},
     @{N="Diretório"; E={ $_.Path }} |
     Format-List
 
@@ -315,8 +487,15 @@ Get-VMDvdDrive -VMName $VMName |
     Format-List
 
 Get-VMNetworkAdapter -VMName $VMName |
-    Select-Object VMName, Name, SwitchName |
+    Select-Object VMName, Name, SwitchName, MacAddressSpoofing |
     Format-List
 
 Write-Host "A VM está rodando e bootando pela ISO."                                             -ForegroundColor Cyan
 Write-Host "Abra o Hyper-V Manager e conecte-se à '$VMName' para prosseguir com a instalação." -ForegroundColor Cyan
+
+if ($EnableNested) {
+    Write-Host ""
+    Write-Host "Virtualização Aninhada ATIVA. Depois de instalar o sistema, habilite o Hyper-V dentro da VM:" -ForegroundColor Cyan
+    Write-Host "  Windows Server : Install-WindowsFeature -Name Hyper-V -IncludeManagementTools -Restart"      -ForegroundColor DarkGray
+    Write-Host "  Windows 10/11  : Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All" -ForegroundColor DarkGray
+}
