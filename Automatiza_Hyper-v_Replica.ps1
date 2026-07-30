@@ -17,6 +17,16 @@
 #             por store, Test-CertificadoReplica valida a CADEIA de
 #             fato (X509Chain) e a etapa de certificado reinstala a CA
 #             raiz do .cer quando ela estiver ausente.
+#             1.1.0 — Menu 2 -> 13: RENOVAR o certificado da replicação
+#             antes do vencimento, em duas fases (gerar / aplicar) e com
+#             dois modos: reemitir SÓ o certificado do host mantendo a
+#             mesma CA raiz (sem janela de risco, pois o par já confia
+#             nela) ou gerar cadeia nova completa. A implantação passa a
+#             exportar HyperV_Replica_RootCA.pfx para preservar a chave
+#             da CA — sem ela, a raiz não pode mais assinar nada. A
+#             aplicação atualiza o servidor Replica E o thumbprint de
+#             CADA VM replicada, com Test-VMReplicationConnection como
+#             trava antes da troca.
 # ============================================================
 #
 #  COMO USAR EM CAMPO:
@@ -59,7 +69,13 @@ $script:PastaScript    = $PSScriptRoot
 $script:ArquivoEstado  = Join-Path $PSScriptRoot ("Estado_Replica_{0}.json" -f $env:COMPUTERNAME)
 $script:ArquivoPfx     = Join-Path $PSScriptRoot "HyperV_Replica_Cert.pfx"
 $script:ArquivoRootCer = Join-Path $PSScriptRoot "HyperV_Replica_RootCA.cer"
+# PFX da CA raiz: guarda a CHAVE PRIVADA da CA para que a RENOVAÇÃO possa
+# reemitir apenas o certificado do host (Menu 2 -> 13) sem trocar a raiz —
+# o par já confia nela, então a renovação não tem janela de risco.
+$script:ArquivoRootPfx = Join-Path $PSScriptRoot "HyperV_Replica_RootCA.pfx"
 $script:PastaLogs      = Join-Path $PSScriptRoot "Logs"
+$script:AnosCertHost   = 5
+$script:AnosCertRaiz   = 10
 $script:PortaKerberos  = 80
 $script:PortaCert      = 443
 $script:RegReplicacao  = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\Replication"
@@ -143,6 +159,32 @@ function Read-NonEmpty {
         }
     } while ([string]::IsNullOrWhiteSpace($valor))
     return $valor
+}
+
+# ------------------------------------------------------------
+# Lê um inteiro dentro de uma faixa, com reprompt e padrão no ENTER vazio
+# ------------------------------------------------------------
+function Read-Inteiro {
+    param(
+        [Parameter(Mandatory = $true)][string]$Mensagem,
+        [int]$Padrao,
+        [int]$Minimo = 1,
+        [int]$Maximo = 100
+    )
+    while ($true) {
+        $bruto = (Read-Host ("  >> {0} [{1}]" -f $Mensagem, $Padrao)).Trim()
+        if ([string]::IsNullOrWhiteSpace($bruto)) { return $Padrao }
+        $numero = 0
+        if (-not [int]::TryParse($bruto, [ref]$numero)) {
+            Write-Status -Tipo AVISO -Mensagem "Informe um número inteiro."
+            continue
+        }
+        if ($numero -lt $Minimo -or $numero -gt $Maximo) {
+            Write-Status -Tipo AVISO -Mensagem "Informe um valor entre $Minimo e $Maximo."
+            continue
+        }
+        return $numero
+    }
 }
 
 # ------------------------------------------------------------
@@ -304,6 +346,9 @@ function New-EstadoImplantacao {
         PastaReplicas         = ""
         Etapas                = [pscustomobject]@{}
         RebootPendente        = $null       # {Motivo, DataHora}
+        # Renovação de certificado gerada e ainda NÃO aplicada neste host
+        # (Menu 2 -> 13). Guarda o thumbprint novo entre as duas fases.
+        RenovacaoPendente     = $null       # {Thumbprint, RootCAThumbprint, Modo, GeradoEm, NotAfter}
     }
 }
 
@@ -895,6 +940,110 @@ function Set-ChecagemRevogacaoDesabilitada {
 #  saved as the Issuer Name" — ou seja, autoassinado.
 # Fonte: https://learn.microsoft.com/powershell/module/pki/new-selfsignedcertificate
 # ------------------------------------------------------------
+
+# ------------------------------------------------------------
+# Emite UM certificado de host assinado pela CA raiz informada.
+# Isolado em função própria porque é usado na implantação (Menu 1) e na
+# RENOVAÇÃO (Menu 2 -> 13), que reemite o host mantendo a mesma raiz.
+# ------------------------------------------------------------
+function New-CertificadoHost {
+    param(
+        [Parameter(Mandatory = $true)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Assinante,
+        [Parameter(Mandatory = $true)][string[]]$Fqdns,
+        [int]$Anos = $script:AnosCertHost
+    )
+    try {
+        $cert = New-SelfSignedCertificate -Type Custom `
+                                          -Subject "CN=$($Fqdns[0])" `
+                                          -DnsName $Fqdns `
+                                          -Signer $Assinante `
+                                          -KeyUsage DigitalSignature, KeyEncipherment `
+                                          -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2') `
+                                          -KeyExportPolicy Exportable `
+                                          -KeyLength 2048 `
+                                          -KeyAlgorithm RSA `
+                                          -HashAlgorithm SHA256 `
+                                          -NotAfter (Get-Date).AddYears($Anos) `
+                                          -FriendlyName 'Hyper-V Replica' `
+                                          -CertStoreLocation 'Cert:\LocalMachine\My' `
+                                          -ErrorAction Stop
+        Write-Status -Tipo OK -Mensagem "Certificado do host gerado. Thumbprint: $($cert.Thumbprint)"
+        Write-Status -Tipo INFO -Mensagem "Emissor: $($cert.Issuer)"
+        Write-Status -Tipo INFO -Mensagem "Validade: até $($cert.NotAfter.ToString('dd/MM/yyyy'))"
+        return $cert
+    } catch {
+        Write-Status -Tipo ERRO -Mensagem "Falha ao gerar o certificado do host: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# ------------------------------------------------------------
+# Exporta a CHAVE PRIVADA da CA raiz para PFX. Sem este arquivo, a raiz
+# não pode mais assinar nada e toda renovação exige cadeia NOVA (o que
+# obriga a reimportar a raiz em todos os hosts).
+# Precisa ser chamado ENQUANTO a raiz ainda está em LocalMachine\My —
+# depois de removida de My, a chave privada não existe mais.
+# ------------------------------------------------------------
+function Export-RootCAReplica {
+    param(
+        [Parameter(Mandatory = $true)][System.Security.Cryptography.X509Certificates.X509Certificate2]$RootCA,
+        [Parameter(Mandatory = $true)][System.Security.SecureString]$Senha
+    )
+    try {
+        Export-PfxCertificate -Cert $RootCA -FilePath $script:ArquivoRootPfx -Password $Senha `
+                              -ChainOption EndEntityCertOnly -Force -ErrorAction Stop | Out-Null
+        Write-Status -Tipo OK -Mensagem "Chave da CA raiz exportada: $script:ArquivoRootPfx"
+        Write-Status -Tipo AVISO -Mensagem "Este arquivo permite EMITIR novos certificados confiáveis — guarde-o"
+        Write-Host "         com o mesmo cuidado de uma senha de administrador." -ForegroundColor Yellow
+        return $true
+    } catch {
+        Write-Status -Tipo AVISO -Mensagem "Não foi possível exportar a chave da CA raiz: $($_.Exception.Message)"
+        Write-Status -Tipo AVISO -Mensagem "A renovação futura exigirá gerar uma CADEIA NOVA nos dois hosts."
+        return $false
+    }
+}
+
+# ------------------------------------------------------------
+# Devolve a CA raiz COM CHAVE PRIVADA, pronta para assinar:
+#   1) se já estiver em LocalMachine\My, usa;
+#   2) senão, importa do HyperV_Replica_RootCA.pfx (pede a senha).
+# Devolve $null quando a chave não está disponível — nesse caso a
+# renovação só pode gerar uma cadeia nova.
+# ------------------------------------------------------------
+function Get-RootCAAssinante {
+    param([int]$Tentativas = 3)
+
+    $comChave = Get-ChildItem -Path 'Cert:\LocalMachine\My' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Subject -eq 'CN=Hyper-V Replica Root CA' -and $_.HasPrivateKey } |
+        Sort-Object NotAfter -Descending | Select-Object -First 1
+    if ($comChave) {
+        Write-Status -Tipo OK -Mensagem "CA raiz com chave privada encontrada na store (thumbprint $($comChave.Thumbprint))."
+        return [pscustomobject]@{ Certificado = $comChave; ImportadaAgora = $false }
+    }
+
+    if (-not (Test-Path $script:ArquivoRootPfx)) { return $null }
+
+    Write-Status -Tipo INFO -Mensagem "Chave da CA raiz disponível em $(Split-Path $script:ArquivoRootPfx -Leaf)."
+    $importada = $null
+    $n = 0
+    while ($null -eq $importada -and $n -lt $Tentativas) {
+        $n++
+        $senha = Read-Host "  >> Senha do PFX da CA raiz [$n/$Tentativas]" -AsSecureString
+        try {
+            $importada = Import-PfxCertificate -FilePath $script:ArquivoRootPfx `
+                                               -CertStoreLocation 'Cert:\LocalMachine\My' `
+                                               -Password $senha -Exportable -ErrorAction Stop
+        } catch {
+            Write-Status -Tipo AVISO -Mensagem "Falha ao abrir o PFX da CA raiz (senha incorreta?): $($_.Exception.Message)"
+        }
+    }
+    if ($null -eq $importada) {
+        Write-Status -Tipo ERRO -Mensagem "Não foi possível abrir o PFX da CA raiz."
+        return $null
+    }
+    return [pscustomobject]@{ Certificado = $importada; ImportadaAgora = $true }
+}
+
 function New-CertificadoReplica {
     param([Parameter(Mandatory = $true)]$Estado)
 
@@ -915,6 +1064,7 @@ function New-CertificadoReplica {
     Write-Host "  Chave            : RSA 2048, SHA-256, exportável"            -ForegroundColor White
     Write-Host "  Arquivos gerados : $(Split-Path $script:ArquivoRootCer -Leaf)  (CA raiz pública)" -ForegroundColor White
     Write-Host "                     $(Split-Path $script:ArquivoPfx -Leaf)  (certificado do host + chave)" -ForegroundColor White
+    Write-Host "                     $(Split-Path $script:ArquivoRootPfx -Leaf)  (chave da CA — permite RENOVAR)" -ForegroundColor White
     Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkCyan
     Write-Host ""
 
@@ -961,26 +1111,8 @@ function New-CertificadoReplica {
     }
 
     # ---- 2) Certificado do host, ASSINADO pela CA raiz ----
-    $cert = $null
-    try {
-        $cert = New-SelfSignedCertificate -Type Custom `
-                                          -Subject "CN=$($fqdns[0])" `
-                                          -DnsName $fqdns `
-                                          -Signer $rootCA `
-                                          -KeyUsage DigitalSignature, KeyEncipherment `
-                                          -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2') `
-                                          -KeyExportPolicy Exportable `
-                                          -KeyLength 2048 `
-                                          -KeyAlgorithm RSA `
-                                          -HashAlgorithm SHA256 `
-                                          -NotAfter (Get-Date).AddYears(5) `
-                                          -FriendlyName 'Hyper-V Replica' `
-                                          -CertStoreLocation 'Cert:\LocalMachine\My' `
-                                          -ErrorAction Stop
-        Write-Status -Tipo OK -Mensagem "Certificado do host gerado. Thumbprint: $($cert.Thumbprint)"
-        Write-Status -Tipo INFO -Mensagem "Emissor: $($cert.Issuer)"
-    } catch {
-        Write-Status -Tipo ERRO -Mensagem "Falha ao gerar o certificado do host: $($_.Exception.Message)"
+    $cert = New-CertificadoHost -Assinante $rootCA -Fqdns $fqdns -Anos $script:AnosCertHost
+    if ($null -eq $cert) {
         Remove-CertificadoAntigo -Thumbprint $rootCA.Thumbprint
         return $false
     }
@@ -995,37 +1127,42 @@ function New-CertificadoReplica {
     }
     if (-not (Install-RootCAReplica -CaminhoCer $script:ArquivoRootCer)) { return $false }
 
-    # A CA raiz não deve permanecer em "Pessoal" — seu lugar é a store Root.
-    # Remove SOMENTE de My: sem o -Stores dirigido, a mesma chamada apagaria
-    # a CA da store Root instalada na linha acima e a cadeia ficaria órfã.
-    Remove-CertificadoAntigo -Thumbprint $rootCA.Thumbprint -Stores @('Cert:\LocalMachine\My')
-
-    # A CA raiz precisa estar em Root ANTES de validar/usar o certificado
-    if (-not (Test-RootCAPresente -Thumbprint $rootCA.Thumbprint)) {
-        Write-Status -Tipo ERRO -Mensagem "A CA raiz não está em Autoridades Raiz Confiáveis — a cadeia não seria válida."
-        return $false
-    }
-
-    # ---- 4) Exporta o certificado do host (PFX protegido por senha) ----
+    # ---- 4) Exporta as chaves privadas (PFX protegidos por senha) ----
+    # A CA raiz ainda está em My aqui — é a ÚNICA janela para exportar a
+    # chave dela. Depois de removida de My, a chave deixa de existir e a
+    # renovação futura só poderia gerar uma cadeia nova.
     Write-Host ""
-    Write-Status -Tipo INFO -Mensagem "Defina a senha do PFX. ANOTE-A: ela será pedida ao importar"
-    Write-Host "         o certificado no servidor SECUNDÁRIO/ESTENDIDO." -ForegroundColor Cyan
+    Write-Status -Tipo INFO -Mensagem "Defina a senha dos PFX. ANOTE-A: ela será pedida ao importar"
+    Write-Host "         o certificado no servidor SECUNDÁRIO/ESTENDIDO e ao RENOVAR." -ForegroundColor Cyan
     Write-Host ""
-    $senha = Read-SenhaConfirmada -Mensagem "Senha do arquivo PFX"
+    $senha = Read-SenhaConfirmada -Mensagem "Senha dos arquivos PFX"
     try {
         Export-PfxCertificate -Cert $cert -FilePath $script:ArquivoPfx -Password $senha `
                               -ChainOption EndEntityCertOnly -Force -ErrorAction Stop | Out-Null
         Write-Status -Tipo OK -Mensagem "PFX exportado: $script:ArquivoPfx"
-        Write-Status -Tipo INFO -Mensagem "Copie a PASTA DO SCRIPT (com o .pfx E o .cer da CA raiz)"
-        Write-Host "         para os demais servidores da topologia." -ForegroundColor Cyan
     } catch {
         Write-Status -Tipo ERRO -Mensagem "Falha ao exportar o PFX: $($_.Exception.Message)"
         return $false
     }
 
+    # Chave da CA raiz (habilita a RENOVAÇÃO sem trocar a raiz)
+    Export-RootCAReplica -RootCA $rootCA -Senha $senha | Out-Null
+
+    # ---- 5) A CA raiz sai de "Pessoal"; seu lugar é a store Root ----
+    # Remove SOMENTE de My: sem o -Stores dirigido, a mesma chamada apagaria
+    # a CA da store Root e a cadeia ficaria órfã (erro 0x800B0109).
+    Remove-CertificadoAntigo -Thumbprint $rootCA.Thumbprint -Stores @('Cert:\LocalMachine\My')
+    if (-not (Test-RootCAPresente -Thumbprint $rootCA.Thumbprint)) {
+        Write-Status -Tipo ERRO -Mensagem "A CA raiz não está em Autoridades Raiz Confiáveis — a cadeia não seria válida."
+        return $false
+    }
+
+    Write-Status -Tipo INFO -Mensagem "Copie a PASTA DO SCRIPT (com o .pfx E o .cer da CA raiz)"
+    Write-Host "         para os demais servidores da topologia." -ForegroundColor Cyan
+
     if (-not (Set-ChecagemRevogacaoDesabilitada)) { return $false }
 
-    # ---- 5) Validação final da cadeia gerada ----
+    # ---- 6) Validação final da cadeia gerada ----
     $validacao = Test-CertificadoReplica -Certificado $cert -FqdnEsperado (Get-HostFqdn)
     foreach ($motivo in $validacao.Motivos) {
         if ($motivo -like 'AVISO:*') { Write-Status -Tipo AVISO -Mensagem $motivo }
@@ -2515,6 +2652,607 @@ function Remove-ReplicacaoVM {
 }
 
 # ------------------------------------------------------------
+# ============================================================
+#  OPÇÃO 2.13 — RENOVAR O CERTIFICADO DA REPLICAÇÃO
+#
+#  Por que existe: o certificado do host vale 5 anos. Renovar à mão exige
+#  gerar a cadeia, distribuir, atualizar o servidor Replica E cada VM
+#  replicada (o thumbprint fica gravado na configuração de CADA VM) — e
+#  errar a ORDEM derruba a replicação.
+#
+#  A REGRA que comanda todo o fluxo:
+#    a CA raiz nova precisa estar confiável em TODOS os hosts ANTES de
+#    qualquer host passar a APRESENTAR o certificado novo.
+#
+#  A autenticação é TLS mútuo: o primário apresenta seu certificado (EKU
+#  Client Auth) e o replica valida contra a store Root; o replica
+#  apresenta o dele (EKU Server Auth) e o primário valida. Por isso os
+#  DOIS lados precisam confiar na raiz antes da troca.
+#
+#  Daí os dois modos:
+#   [A] REEMITIR o certificado do host mantendo a MESMA CA raiz
+#       (exige a chave da CA — HyperV_Replica_RootCA.pfx). O par já
+#       confia na raiz, então NÃO há ordem obrigatória nem janela de
+#       risco: cada host pode ser renovado quando der.
+#   [B] CADEIA NOVA completa (raiz + host), usada quando a chave da CA
+#       não está disponível. Aqui a ordem é obrigatória:
+#         1. primário GERA (não aplica)
+#         2. copiar a pasta para o par
+#         3. par IMPORTA e aplica
+#         4. primário APLICA (com Test-VMReplicationConnection de trava)
+#
+#  Fontes oficiais:
+#   - https://learn.microsoft.com/powershell/module/hyper-v/set-vmreplicationserver
+#   - https://learn.microsoft.com/powershell/module/hyper-v/set-vmreplication
+#   - https://learn.microsoft.com/powershell/module/hyper-v/test-vmreplicationconnection
+# ============================================================
+
+# ------------------------------------------------------------
+# Renomeia um arquivo para .anterior_<data>, preservando rollback
+# ------------------------------------------------------------
+function Backup-ArquivoCertificado {
+    param([Parameter(Mandatory = $true)][string]$Caminho)
+    if (-not (Test-Path $Caminho)) { return }
+    try {
+        $destino = "{0}.anterior_{1}" -f $Caminho, (Get-Date -Format 'yyyyMMdd_HHmmss')
+        Move-Item -Path $Caminho -Destination $destino -Force -ErrorAction Stop
+        Write-Status -Tipo INFO -Mensagem "Arquivo anterior preservado: $(Split-Path $destino -Leaf)"
+    } catch {
+        Write-Status -Tipo AVISO -Mensagem "Não foi possível preservar '$(Split-Path $Caminho -Leaf)': $($_.Exception.Message)"
+    }
+}
+
+# ------------------------------------------------------------
+# Lê o thumbprint de um PFX SEM importá-lo (Get-PfxData). Serve para
+# mostrar ao operador se o arquivo da pasta é mais novo que o instalado.
+# ------------------------------------------------------------
+function Get-ThumbprintPfx {
+    param(
+        [Parameter(Mandatory = $true)][string]$Caminho,
+        [Parameter(Mandatory = $true)][System.Security.SecureString]$Senha
+    )
+    try {
+        $dados = Get-PfxData -FilePath $Caminho -Password $Senha -ErrorAction Stop
+        $folha = @($dados.EndEntityCertificates) | Select-Object -First 1
+        if ($folha) { return $folha.Thumbprint }
+        return $null
+    } catch {
+        return $null
+    }
+}
+
+# ------------------------------------------------------------
+# Mostra o retrato do certificado NESTE host: o que o estado diz, o que
+# está na store, o que o servidor Replica usa e o que cada VM usa.
+# Divergência entre esses quatro é a causa mais comum de falha após uma
+# renovação feita pela metade.
+# ------------------------------------------------------------
+function Show-DiagnosticoCertificado {
+    param([Parameter(Mandatory = $true)]$Estado)
+
+    Write-Host ""
+    Write-Host "  ── Certificado atual deste host ────────────────────────" -ForegroundColor DarkCyan
+
+    $cert = Get-CertificadoInstalado -Thumbprint $Estado.CertificadoThumbprint
+    if ($cert) {
+        $dias = [int]([math]::Floor(($cert.NotAfter - (Get-Date)).TotalDays))
+        $corDias = 'Green'
+        if ($dias -le 0)       { $corDias = 'Red' }
+        elseif ($dias -le 90)  { $corDias = 'Yellow' }
+        Write-Host ("  Requerente       : {0}" -f $cert.Subject)               -ForegroundColor White
+        Write-Host ("  Emissor          : {0}" -f $cert.Issuer)                -ForegroundColor White
+        Write-Host ("  Thumbprint       : {0}" -f $cert.Thumbprint)            -ForegroundColor White
+        Write-Host ("  Expira em        : {0}  ({1} dia(s))" -f $cert.NotAfter.ToString('dd/MM/yyyy'), $dias) -ForegroundColor $corDias
+        try { Write-Host ("  SANs             : {0}" -f (@($cert.DnsNameList | ForEach-Object { $_.Unicode }) -join ', ')) -ForegroundColor White } catch { }
+        $val = Test-CertificadoReplica -Certificado $cert -FqdnEsperado (Get-HostFqdn)
+        if ($val.Valido) {
+            Write-Host  "  Validação        : OK (cadeia, EKU e SAN)"          -ForegroundColor Green
+        } else {
+            Write-Host  "  Validação        : FALHOU"                          -ForegroundColor Red
+            foreach ($m in $val.Motivos) { Write-Host "                     . $m" -ForegroundColor Red }
+        }
+    } else {
+        Write-Host "  (nenhum certificado do estado encontrado em LocalMachine\My)" -ForegroundColor Yellow
+    }
+
+    $tpRaiz = $null
+    if ($Estado.PSObject.Properties['RootCAThumbprint']) { $tpRaiz = $Estado.RootCAThumbprint }
+    if ($tpRaiz) {
+        $naRaiz = Test-RootCAPresente -Thumbprint $tpRaiz
+        $corRaiz = 'Green'; $txtRaiz = 'confiável'
+        if (-not $naRaiz) { $corRaiz = 'Red'; $txtRaiz = 'AUSENTE de LocalMachine\Root' }
+        Write-Host ("  CA raiz          : {0}  ({1})" -f $tpRaiz, $txtRaiz) -ForegroundColor $corRaiz
+    }
+
+    # Chave da CA raiz: define se a renovação pode manter a mesma raiz
+    $temChaveNaStore = $null -ne (Get-ChildItem -Path 'Cert:\LocalMachine\My' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Subject -eq 'CN=Hyper-V Replica Root CA' -and $_.HasPrivateKey })
+    if ($temChaveNaStore) {
+        Write-Host "  Chave da CA      : disponível na store (permite reemitir só o host)" -ForegroundColor Green
+    } elseif (Test-Path $script:ArquivoRootPfx) {
+        Write-Host ("  Chave da CA      : disponível em {0} (permite reemitir só o host)" -f (Split-Path $script:ArquivoRootPfx -Leaf)) -ForegroundColor Green
+    } else {
+        Write-Host "  Chave da CA      : INDISPONÍVEL — a renovação exigirá cadeia nova" -ForegroundColor Yellow
+    }
+
+    # O que o SERVIDOR Replica usa hoje
+    $cfg = Get-VMReplicationServer -ErrorAction SilentlyContinue
+    if ($null -ne $cfg) {
+        $tpServidor = [string]$cfg.CertificateThumbprint
+        if ([string]::IsNullOrWhiteSpace($tpServidor)) { $tpServidor = '(vazio)' }
+        $corSrv = 'White'
+        if ($cert -and $tpServidor -ne $cert.Thumbprint) { $corSrv = 'Yellow' }
+        Write-Host ("  Servidor Replica : {0}" -f $tpServidor) -ForegroundColor $corSrv
+    }
+
+    # O que cada VM replicada usa hoje
+    $reps = @(Get-VMReplication -ErrorAction SilentlyContinue | Sort-Object VMName)
+    if ($reps.Count -gt 0) {
+        Write-Host "  VMs replicadas   :" -ForegroundColor White
+        foreach ($r in $reps) {
+            $tpVm = [string]$r.CertificateThumbprint
+            if ([string]::IsNullOrWhiteSpace($tpVm)) { $tpVm = '(vazio)' }
+            $corVm = 'White'
+            if ($cert -and $tpVm -ne $cert.Thumbprint) { $corVm = 'Yellow' }
+            Write-Host ("    {0,-22} {1,-8} {2}" -f $r.VMName, [string]$r.ReplicationMode, $tpVm) -ForegroundColor $corVm
+        }
+    } else {
+        Write-Host "  VMs replicadas   : (nenhuma neste host)" -ForegroundColor DarkGray
+    }
+
+    $pend = $null
+    if ($Estado.PSObject.Properties['RenovacaoPendente']) { $pend = $Estado.RenovacaoPendente }
+    if ($null -ne $pend) {
+        Write-Host ("  RENOVAÇÃO PENDENTE: {0} (modo {1}, gerada em {2})" -f $pend.Thumbprint, $pend.Modo, $pend.GeradoEm) -ForegroundColor Yellow
+    }
+    Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkCyan
+}
+
+# ------------------------------------------------------------
+# Aplica um thumbprint no servidor Replica e em TODAS as VMs replicadas
+# deste host. Os dois lugares importam: o servidor define o certificado
+# do ouvinte; cada VM guarda o seu próprio thumbprint na configuração de
+# replicação (Get-VMReplication.CertificateThumbprint).
+# ------------------------------------------------------------
+function Set-ThumbprintReplicacao {
+    param([Parameter(Mandatory = $true)][string]$Thumbprint)
+
+    $tudoOk = $true
+
+    try {
+        Set-VMReplicationServer -CertificateThumbprint $Thumbprint -ErrorAction Stop
+        Write-Status -Tipo OK -Mensagem "Servidor Replica atualizado para o novo certificado."
+    } catch {
+        Write-Status -Tipo ERRO -Mensagem "Falha ao atualizar o servidor Replica: $($_.Exception.Message)"
+        $tudoOk = $false
+    }
+
+    $reps = @(Get-VMReplication -ErrorAction SilentlyContinue | Sort-Object VMName)
+    if ($reps.Count -eq 0) {
+        Write-Status -Tipo INFO -Mensagem "Nenhuma VM replicada neste host — nada a atualizar por VM."
+        return $tudoOk
+    }
+
+    $ok = 0; $falhas = 0
+    foreach ($r in $reps) {
+        try {
+            Set-VMReplication -VMName $r.VMName -CertificateThumbprint $Thumbprint -ErrorAction Stop
+            Write-Status -Tipo OK -Mensagem "VM '$($r.VMName)' atualizada."
+            $ok++
+        } catch {
+            Write-Status -Tipo ERRO -Mensagem "VM '$($r.VMName)': $($_.Exception.Message)"
+            $falhas++
+        }
+    }
+    Write-Host ""
+    Write-Status -Tipo INFO -Mensagem "VMs atualizadas: $ok | falhas: $falhas"
+    if ($falhas -gt 0) { $tudoOk = $false }
+    return $tudoOk
+}
+
+# ------------------------------------------------------------
+# Trava de segurança: antes de trocar o certificado ativo, prova que o
+# PAR aceita o thumbprint novo. Se o par ainda não confia na raiz nova,
+# o teste falha aqui e nada é alterado — a replicação atual continua de
+# pé com o certificado antigo.
+# ------------------------------------------------------------
+function Test-CertificadoNoPar {
+    param(
+        [Parameter(Mandatory = $true)]$Estado,
+        [Parameter(Mandatory = $true)][string]$Thumbprint
+    )
+    $par = Get-HostPar -Estado $Estado
+    if (-not $par) {
+        Write-Status -Tipo AVISO -Mensagem "Par não identificado na topologia — não foi possível testar o certificado remotamente."
+        return $null
+    }
+    Write-Status -Tipo INFO -Mensagem "Testando o certificado novo contra '$($par.Fqdn)' (porta $($script:PortaCert))..."
+    try {
+        Test-VMReplicationConnection -ReplicaServerName $par.Fqdn `
+                                     -ReplicaServerPort $script:PortaCert `
+                                     -AuthenticationType Certificate `
+                                     -CertificateThumbprint $Thumbprint `
+                                     -ErrorAction Stop | Out-Null
+        Write-Status -Tipo OK -Mensagem "O par '$($par.Fqdn)' ACEITOU o certificado novo."
+        return $true
+    } catch {
+        Write-Status -Tipo ERRO -Mensagem "O par '$($par.Fqdn)' NÃO aceitou o certificado novo:"
+        Write-Host "         $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+# ------------------------------------------------------------
+# FASE 1 (no PRIMÁRIO) — gera o certificado novo e NÃO aplica nada.
+# ------------------------------------------------------------
+function New-RenovacaoCertificado {
+    param([Parameter(Mandatory = $true)]$Estado)
+
+    $fqdns = @($Estado.Topologia | ForEach-Object { $_.Fqdn })
+    if ($fqdns.Count -lt 2) {
+        Write-Status -Tipo ERRO -Mensagem "Topologia incompleta no estado — rode o Menu 1 antes de renovar."
+        return $false
+    }
+
+    # Modo: com a chave da CA reemitimos só o host; sem ela, cadeia nova.
+    $assinante = Get-RootCAAssinante
+    $modo = 'CadeiaNova'
+    if ($null -ne $assinante) {
+        Write-Host ""
+        $escolha = Select-FromList -Titulo "Como renovar?" -Itens @(
+            "REEMITIR o certificado do host mantendo a MESMA CA raiz (RECOMENDADO)",
+            "Gerar uma CADEIA NOVA completa (CA raiz + certificado do host)"
+        )
+        if ($escolha -like 'REEMITIR*') { $modo = 'ReemitirHost' }
+    } else {
+        Write-Status -Tipo AVISO -Mensagem "A chave da CA raiz não está disponível — só é possível gerar CADEIA NOVA."
+        Write-Host "         (cadeias criadas antes da v1.1.0 não preservavam a chave da CA)" -ForegroundColor Yellow
+    }
+
+    $anos = Read-Inteiro -Mensagem "Validade do novo certificado do host, em anos" -Padrao $script:AnosCertHost -Minimo 1 -Maximo 30
+
+    Write-Host ""
+    Write-Host "  ── Resumo da renovação ─────────────────────────────────" -ForegroundColor DarkCyan
+    if ($modo -eq 'ReemitirHost') {
+        Write-Host "  Modo             : reemitir SÓ o certificado do host"     -ForegroundColor White
+        Write-Host "  CA raiz          : MANTIDA (o par já confia nela)"        -ForegroundColor White
+        Write-Host "  No par           : basta importar o novo .pfx — SEM ordem obrigatória" -ForegroundColor Green
+    } else {
+        Write-Host "  Modo             : CADEIA NOVA (CA raiz + certificado do host)" -ForegroundColor White
+        Write-Host "  CA raiz          : NOVA — todos os hosts terão de confiar nela" -ForegroundColor Yellow
+        Write-Host "  No par           : importar .cer E .pfx ANTES de aplicar aqui"  -ForegroundColor Yellow
+    }
+    Write-Host ("  Validade         : {0} ano(s)" -f $anos)                     -ForegroundColor White
+    Write-Host ("  SANs             : {0}" -f ($fqdns -join ', '))              -ForegroundColor White
+    Write-Host "  Aplicação        : NADA é aplicado agora (fase 2 é separada)" -ForegroundColor White
+    Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    if (-not (Confirm-Operacao -Mensagem "Gerar o novo certificado agora?")) {
+        Write-Status -Tipo AVISO -Mensagem "Operação cancelada."
+        if ($null -ne $assinante -and $assinante.ImportadaAgora) {
+            Remove-CertificadoAntigo -Thumbprint $assinante.Certificado.Thumbprint -Stores @('Cert:\LocalMachine\My')
+        }
+        return $false
+    }
+
+    $rootCA        = $null
+    $rootCANova    = $false
+    $limparRootMy  = $false
+
+    if ($modo -eq 'ReemitirHost') {
+        $rootCA = $assinante.Certificado
+        $limparRootMy = $assinante.ImportadaAgora
+        # A raiz que vai assinar TEM de ser confiável neste host, senão o
+        # certificado emitido não encadeia (0x800B0109).
+        if (-not (Test-RootCAPresente -Thumbprint $rootCA.Thumbprint)) {
+            Write-Status -Tipo ERRO -Mensagem "A CA raiz que assinaria não está em Autoridades Raiz Confiáveis."
+            Write-Host "         Instale-a antes (Menu 1, etapa 10) ou escolha CADEIA NOVA." -ForegroundColor Red
+            if ($limparRootMy) { Remove-CertificadoAntigo -Thumbprint $rootCA.Thumbprint -Stores @('Cert:\LocalMachine\My') }
+            return $false
+        }
+    } else {
+        try {
+            $rootCA = New-SelfSignedCertificate -Type Custom `
+                                                -Subject 'CN=Hyper-V Replica Root CA' `
+                                                -KeyUsage CertSign, CRLSign, DigitalSignature `
+                                                -TextExtension @('2.5.29.19={text}CA=1&pathlength=0') `
+                                                -KeyExportPolicy Exportable `
+                                                -KeyLength 2048 `
+                                                -KeyAlgorithm RSA `
+                                                -HashAlgorithm SHA256 `
+                                                -NotAfter (Get-Date).AddYears($script:AnosCertRaiz) `
+                                                -FriendlyName 'Hyper-V Replica Root CA' `
+                                                -CertStoreLocation 'Cert:\LocalMachine\My' `
+                                                -ErrorAction Stop
+            Write-Status -Tipo OK -Mensagem "CA raiz nova gerada. Thumbprint: $($rootCA.Thumbprint)"
+            $rootCANova   = $true
+            $limparRootMy = $true
+        } catch {
+            Write-Status -Tipo ERRO -Mensagem "Falha ao gerar a CA raiz: $($_.Exception.Message)"
+            return $false
+        }
+    }
+
+    # ---- Emite o certificado do host ----
+    $certNovo = New-CertificadoHost -Assinante $rootCA -Fqdns $fqdns -Anos $anos
+    if ($null -eq $certNovo) {
+        if ($rootCANova) { Remove-CertificadoAntigo -Thumbprint $rootCA.Thumbprint }
+        elseif ($limparRootMy) { Remove-CertificadoAntigo -Thumbprint $rootCA.Thumbprint -Stores @('Cert:\LocalMachine\My') }
+        return $false
+    }
+
+    # ---- Arquivos para distribuição (preserva os anteriores) ----
+    Write-Host ""
+    Write-Status -Tipo INFO -Mensagem "Defina a senha dos NOVOS arquivos PFX (pode ser diferente da antiga)."
+    $senhaNova = Read-SenhaConfirmada -Mensagem "Senha dos novos arquivos PFX"
+
+    Backup-ArquivoCertificado -Caminho $script:ArquivoPfx
+    try {
+        Export-PfxCertificate -Cert $certNovo -FilePath $script:ArquivoPfx -Password $senhaNova `
+                              -ChainOption EndEntityCertOnly -Force -ErrorAction Stop | Out-Null
+        Write-Status -Tipo OK -Mensagem "Novo PFX do host exportado: $script:ArquivoPfx"
+    } catch {
+        Write-Status -Tipo ERRO -Mensagem "Falha ao exportar o novo PFX: $($_.Exception.Message)"
+        return $false
+    }
+
+    if ($rootCANova) {
+        Backup-ArquivoCertificado -Caminho $script:ArquivoRootCer
+        Backup-ArquivoCertificado -Caminho $script:ArquivoRootPfx
+        try {
+            Export-Certificate -Cert $rootCA -FilePath $script:ArquivoRootCer -Force -ErrorAction Stop | Out-Null
+            Write-Status -Tipo OK -Mensagem "Nova CA raiz exportada: $script:ArquivoRootCer"
+        } catch {
+            Write-Status -Tipo ERRO -Mensagem "Falha ao exportar a nova CA raiz: $($_.Exception.Message)"
+            return $false
+        }
+        if (-not (Install-RootCAReplica -CaminhoCer $script:ArquivoRootCer)) { return $false }
+        Export-RootCAReplica -RootCA $rootCA -Senha $senhaNova | Out-Null
+    }
+
+    # A raiz não fica em "Pessoal" (a chave dela vive no PFX)
+    if ($limparRootMy) {
+        Remove-CertificadoAntigo -Thumbprint $rootCA.Thumbprint -Stores @('Cert:\LocalMachine\My')
+    }
+
+    Set-ChecagemRevogacaoDesabilitada | Out-Null
+
+    # ---- Validação do que foi gerado ----
+    $val = Test-CertificadoReplica -Certificado $certNovo -FqdnEsperado (Get-HostFqdn)
+    foreach ($m in $val.Motivos) {
+        if ($m -like 'AVISO:*') { Write-Status -Tipo AVISO -Mensagem $m } else { Write-Status -Tipo ERRO -Mensagem $m }
+    }
+    if (-not $val.Valido) {
+        Write-Status -Tipo ERRO -Mensagem "O certificado gerado não passou na validação — nada foi aplicado."
+        return $false
+    }
+
+    # ---- Registra a renovação PENDENTE (fase 2 usa isso) ----
+    $Estado | Add-Member -MemberType NoteProperty -Name 'RenovacaoPendente' -Force -Value ([pscustomobject]@{
+        Thumbprint       = $certNovo.Thumbprint
+        RootCAThumbprint = $rootCA.Thumbprint
+        Modo             = $modo
+        GeradoEm         = (Get-Date).ToString('dd/MM/yyyy HH:mm:ss')
+        NotAfter         = $certNovo.NotAfter.ToString('dd/MM/yyyy')
+    })
+    Save-EstadoImplantacao -Estado $Estado
+
+    # ---- Instruções: é aqui que o operador não pode errar ----
+    Write-Host ""
+    Write-Host "  ═══ PRÓXIMOS PASSOS ═══════════════════════════════════" -ForegroundColor Yellow
+    Write-Host ("  Novo thumbprint : {0}" -f $certNovo.Thumbprint) -ForegroundColor White
+    Write-Host ("  Expira em       : {0}" -f $certNovo.NotAfter.ToString('dd/MM/yyyy')) -ForegroundColor White
+    Write-Host ""
+    if ($modo -eq 'ReemitirHost') {
+        Write-Host "  A CA raiz NÃO mudou — o par já confia nela. Não há ordem"    -ForegroundColor Green
+        Write-Host "  obrigatória e a replicação atual não corre risco."           -ForegroundColor Green
+        Write-Host ""
+        Write-Host "  1) NESTE host: opção 13 -> 'Aplicar o certificado gerado'."  -ForegroundColor White
+        Write-Host ("  2) Copie {0} para a pasta do script do PAR." -f (Split-Path $script:ArquivoPfx -Leaf)) -ForegroundColor White
+        Write-Host "  3) NO PAR: opção 13 -> 'Importar e aplicar' (para que ele"   -ForegroundColor White
+        Write-Host "     também apresente o certificado novo — necessário para o"  -ForegroundColor White
+        Write-Host "     FAILOVER REVERSO e para a replicação estendida)."         -ForegroundColor White
+    } else {
+        Write-Host "  A CA raiz MUDOU. Siga EXATAMENTE esta ordem, senão a"        -ForegroundColor Yellow
+        Write-Host "  replicação para de autenticar:"                              -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host ("  1) Copie a PASTA DO SCRIPT (com {0} E {1})" -f (Split-Path $script:ArquivoRootCer -Leaf), (Split-Path $script:ArquivoPfx -Leaf)) -ForegroundColor White
+        Write-Host "     para o servidor PAR."                                     -ForegroundColor White
+        Write-Host "  2) NO PAR: opção 13 -> 'Importar e aplicar'. Isso instala a" -ForegroundColor White
+        Write-Host "     raiz nova e faz o par confiar nela."                      -ForegroundColor White
+        Write-Host "  3) VOLTE AQUI: opção 13 -> 'Aplicar o certificado gerado'."  -ForegroundColor White
+        Write-Host "     O script testa o par antes de aplicar e aborta se ele"    -ForegroundColor White
+        Write-Host "     ainda não estiver pronto."                                -ForegroundColor White
+    }
+    Write-Host ""
+    Write-Host "  O certificado ANTIGO continua ativo até você aplicar o novo."    -ForegroundColor Cyan
+    Write-Host "  ═══════════════════════════════════════════════════════" -ForegroundColor Yellow
+    return $true
+}
+
+# ------------------------------------------------------------
+# FASE 2 — aplica o certificado já instalado nesta máquina (servidor
+# Replica + cada VM). Funciona no primário (após gerar) e no par (após
+# importar).
+# ------------------------------------------------------------
+function Invoke-AplicacaoCertificadoRenovado {
+    param(
+        [Parameter(Mandatory = $true)]$Estado,
+        [Parameter(Mandatory = $true)][string]$Thumbprint,
+        [string]$Modo = 'CadeiaNova'
+    )
+
+    $cert = Get-CertificadoInstalado -Thumbprint $Thumbprint
+    if (-not $cert) {
+        Write-Status -Tipo ERRO -Mensagem "O certificado $Thumbprint não está em LocalMachine\My deste host."
+        return $false
+    }
+    $val = Test-CertificadoReplica -Certificado $cert -FqdnEsperado (Get-HostFqdn)
+    foreach ($m in $val.Motivos) {
+        if ($m -like 'AVISO:*') { Write-Status -Tipo AVISO -Mensagem $m } else { Write-Status -Tipo ERRO -Mensagem $m }
+    }
+    if (-not $val.Valido) {
+        Write-Status -Tipo ERRO -Mensagem "O certificado não atende aos requisitos neste host — aplicação abortada."
+        return $false
+    }
+
+    # Trava: o par precisa aceitar o certificado novo ANTES da troca.
+    # No modo ReemitirHost a raiz não mudou, então o teste é informativo.
+    $reps = @(Get-VMReplication -ErrorAction SilentlyContinue)
+    if ($reps.Count -gt 0) {
+        $aceito = Test-CertificadoNoPar -Estado $Estado -Thumbprint $Thumbprint
+        if ($aceito -eq $false) {
+            Write-Host ""
+            if ($Modo -eq 'CadeiaNova') {
+                Write-Status -Tipo ERRO -Mensagem "PARE: aplique primeiro no PAR (opção 13 -> Importar e aplicar)."
+                Write-Host "         Aplicar aqui agora derrubaria a autenticação da replicação." -ForegroundColor Red
+                return $false
+            }
+            # Aqui a falha NÃO é necessariamente confiança de certificado: o
+            # par pode simplesmente não estar habilitado como servidor
+            # Replica (só é obrigatório no host que RECEBE), ou a porta 443
+            # pode estar fechada. Por isso avisa em vez de abortar.
+            Write-Status -Tipo AVISO -Mensagem "O teste contra o par falhou. Causas possíveis:"
+            Write-Host "         - o par não está habilitado como servidor Replica (normal no primário);" -ForegroundColor Yellow
+            Write-Host "         - porta 443 bloqueada ou FQDN não resolvendo;"                           -ForegroundColor Yellow
+            Write-Host "         - o par ainda não instalou esta cadeia."                                 -ForegroundColor Yellow
+            if (-not (Read-Confirmacao -Pergunta "Aplicar mesmo assim?" -Padrao 'N')) {
+                Write-Status -Tipo AVISO -Mensagem "Aplicação cancelada."
+                return $false
+            }
+        }
+    } else {
+        Write-Status -Tipo INFO -Mensagem "Nenhuma VM replicada aqui — o teste contra o par foi dispensado."
+    }
+
+    Write-Host ""
+    Write-Host "  ── O que será alterado ─────────────────────────────────" -ForegroundColor DarkCyan
+    Write-Host ("  Novo thumbprint  : {0}" -f $Thumbprint)                  -ForegroundColor White
+    Write-Host ("  Expira em        : {0}" -f $cert.NotAfter.ToString('dd/MM/yyyy')) -ForegroundColor White
+    Write-Host ("  Servidor Replica : Set-VMReplicationServer")             -ForegroundColor White
+    Write-Host ("  VMs a atualizar  : {0}" -f $reps.Count)                  -ForegroundColor White
+    Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkCyan
+    Write-Host ""
+    if (-not (Confirm-Operacao -Mensagem "Aplicar o novo certificado neste host?")) {
+        Write-Status -Tipo AVISO -Mensagem "Operação cancelada."
+        return $false
+    }
+
+    $tpAntigo = $Estado.CertificadoThumbprint
+    if (-not (Set-ThumbprintReplicacao -Thumbprint $Thumbprint)) {
+        Write-Status -Tipo AVISO -Mensagem "A aplicação terminou com falhas — reveja os itens acima antes de seguir."
+    }
+
+    # Estado: o novo passa a ser o oficial e a pendência é encerrada
+    $Estado.CertificadoThumbprint = $Thumbprint
+    $pend = $null
+    if ($Estado.PSObject.Properties['RenovacaoPendente']) { $pend = $Estado.RenovacaoPendente }
+    if ($null -ne $pend -and $pend.RootCAThumbprint) {
+        $Estado | Add-Member -MemberType NoteProperty -Name 'RootCAThumbprint' -Value $pend.RootCAThumbprint -Force
+    }
+    $Estado | Add-Member -MemberType NoteProperty -Name 'RenovacaoPendente' -Value $null -Force
+    Save-EstadoImplantacao -Estado $Estado
+
+    Show-DiagnosticoCertificado -Estado $Estado
+
+    # Limpeza do antigo: só depois de tudo validado, e nunca por padrão
+    if ($tpAntigo -and $tpAntigo -ne $Thumbprint) {
+        Write-Host ""
+        Write-Status -Tipo INFO -Mensagem "O certificado antigo ($tpAntigo) ficou inativo, mas segue instalado."
+        Write-Host "         Só remova depois de confirmar a saúde da replicação nos DOIS hosts" -ForegroundColor Cyan
+        Write-Host "         (Menu 3 -> 1). Ele é o seu caminho de volta se algo der errado."     -ForegroundColor Cyan
+        if (Read-Confirmacao -Pergunta "Remover o certificado ANTIGO agora?" -Padrao 'N') {
+            Remove-CertificadoAntigo -Thumbprint $tpAntigo -Stores @('Cert:\LocalMachine\My')
+        }
+    }
+    return $true
+}
+
+# ------------------------------------------------------------
+# No PAR (secundário/estendido) — importa a cadeia trazida do primário e
+# aplica. Reaproveita Import-CertificadoReplica, que instala a raiz ANTES
+# do PFX e valida SAN/EKU/cadeia para ESTE host.
+# ------------------------------------------------------------
+function Import-RenovacaoCertificado {
+    param([Parameter(Mandatory = $true)]$Estado)
+
+    Write-Status -Tipo INFO -Mensagem "Esta opção instala a cadeia que está na PASTA DO SCRIPT e a ativa neste host."
+    $tpAntes = $Estado.CertificadoThumbprint
+
+    if (-not (Import-CertificadoReplica -Estado $Estado)) { return $false }
+
+    $tpNovo = $Estado.CertificadoThumbprint
+    if ($tpNovo -eq $tpAntes) {
+        Write-Status -Tipo AVISO -Mensagem "O certificado importado é o MESMO já registrado ($tpNovo)."
+        Write-Host "         Verifique se você copiou os arquivos NOVOS do primário." -ForegroundColor Yellow
+        if (-not (Read-Confirmacao -Pergunta "Continuar e reaplicar este thumbprint?" -Padrao 'N')) {
+            return $false
+        }
+    }
+    return (Invoke-AplicacaoCertificadoRenovado -Estado $Estado -Thumbprint $tpNovo -Modo 'Importado')
+}
+
+# ------------------------------------------------------------
+# OPÇÃO 2.13 — orquestrador da renovação
+# ------------------------------------------------------------
+function Invoke-RenovacaoCertificado {
+    Show-Header -Titulo "[ MENU 2.13 ] RENOVAR O CERTIFICADO DA REPLICAÇÃO"
+
+    if (-not (Test-Administrador)) {
+        Write-Status -Tipo ERRO -Mensagem "Execute o PowerShell como ADMINISTRADOR."
+        return
+    }
+
+    $estado = Get-EstadoImplantacao
+    if ([string]::IsNullOrWhiteSpace($estado.Papel)) {
+        Write-Status -Tipo ERRO -Mensagem "Estado da implantação não encontrado — rode o Menu 1 neste servidor primeiro."
+        return
+    }
+    if ($estado.Autenticacao -ne 'Certificate') {
+        Write-Status -Tipo ERRO -Mensagem "Este host usa autenticação '$($estado.Autenticacao)' — não há certificado a renovar."
+        Write-Host "         A renovação só se aplica à autenticação por CERTIFICADO (HTTPS/443)." -ForegroundColor Red
+        return
+    }
+
+    Write-Status -Tipo INFO -Mensagem "Papel deste host: $($estado.Papel) | FQDN: $(Get-HostFqdn)"
+    Show-DiagnosticoCertificado -Estado $estado
+
+    $pend = $null
+    if ($estado.PSObject.Properties['RenovacaoPendente']) { $pend = $estado.RenovacaoPendente }
+
+    $itens = @()
+    if ($estado.Papel -eq 'Primario') {
+        $itens += "GERAR um certificado novo (fase 1 — não aplica nada)"
+    }
+    if ($null -ne $pend) {
+        $itens += "APLICAR o certificado gerado neste host (fase 2)"
+    }
+    $itens += "IMPORTAR a cadeia da pasta do script e aplicar (host que RECEBE a cadeia)"
+    $itens += "Somente rever o diagnóstico acima"
+
+    Write-Host ""
+    $escolha = Select-FromList -Titulo "O que deseja fazer?" -Itens $itens
+
+    $logAtivo = Start-LogOperacao -Operacao "RenovacaoCertificado"
+    try {
+        if ($escolha -like 'GERAR*') {
+            New-RenovacaoCertificado -Estado $estado | Out-Null
+        } elseif ($escolha -like 'APLICAR*') {
+            Invoke-AplicacaoCertificadoRenovado -Estado $estado -Thumbprint $pend.Thumbprint -Modo $pend.Modo | Out-Null
+        } elseif ($escolha -like 'IMPORTAR*') {
+            Import-RenovacaoCertificado -Estado $estado | Out-Null
+        } else {
+            Write-Status -Tipo INFO -Mensagem "Nenhuma alteração feita."
+        }
+    } catch {
+        Write-Status -Tipo ERRO -Mensagem "Falha na renovação: $($_.Exception.Message)"
+    } finally {
+        Stop-LogOperacao -LogAtivo $logAtivo
+    }
+}
+
+# ------------------------------------------------------------
 # OPÇÃO 2.12 — Replicação ESTENDIDA (executar no REPLICA)
 # ------------------------------------------------------------
 function Enable-ReplicacaoEstendida {
@@ -2609,6 +3347,7 @@ function Invoke-MenuAdministracao {
         Write-Host "  [10]  Alterar configurações da replicação"                 -ForegroundColor White
         Write-Host "  [11]  Remover replicação de uma VM"                        -ForegroundColor White
         Write-Host "  [12]  Replicação ESTENDIDA para 3º servidor (no REPLICA)"  -ForegroundColor White
+        Write-Host "  [13]  RENOVAR o certificado da replicação (antes de expirar)" -ForegroundColor White
         Write-Host "  [0]   Voltar ao menu principal"                            -ForegroundColor DarkGray
         Write-Host ""
         $opcaoAdmin = (Read-Host "  >> Digite a opção").Trim()
@@ -2625,6 +3364,7 @@ function Invoke-MenuAdministracao {
             "10" { Set-ConfiguracaoReplicacao }
             "11" { Remove-ReplicacaoVM }
             "12" { Enable-ReplicacaoEstendida }
+            "13" { Invoke-RenovacaoCertificado }
             "0"  { }
             default {
                 Write-Host ""

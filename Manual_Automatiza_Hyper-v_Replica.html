@@ -544,9 +544,64 @@
       <tr><td class="centro"><strong>12</strong></td><td>Replicação ESTENDIDA</td>
           <td><span class="badge b-replica">REPLICA</span></td>
           <td>Estende a replica para o 3º servidor (frequência 5 ou 15 min).</td></tr>
+      <tr><td class="centro"><strong>13</strong></td><td>RENOVAR o certificado</td>
+          <td><span class="badge b-ambos">AMBOS</span></td>
+          <td>Troca o certificado antes de expirar, sem parar a replicação. Duas fases
+          (gerar / aplicar) e dois modos. Detalhes abaixo.</td></tr>
     </tbody>
   </table>
   </div>
+
+  <h3>Opção 13 — renovar o certificado antes de expirar</h3>
+  <p>O certificado do host vale 5 anos. Renovar à mão é arriscado porque o thumbprint fica
+  gravado em <strong>dois lugares</strong>: na configuração do servidor Replica e na configuração
+  de <strong>cada VM replicada</strong>. Esquecer as VMs deixa a replicação apontando para um
+  certificado que não existe mais.</p>
+
+  <p>A regra que comanda a ordem é uma só:</p>
+  <p><strong>A CA raiz nova precisa estar confiável em TODOS os hosts antes de qualquer host
+  passar a apresentar o certificado novo.</strong> Isso porque a autenticação é TLS
+  <em>mútuo</em>: o primário apresenta o certificado dele (EKU <em>Client Authentication</em>) e o
+  replica valida contra a store <code>Root</code>; o replica apresenta o dele (EKU
+  <em>Server Authentication</em>) e o primário valida do mesmo jeito.</p>
+
+  <div class="tabela-wrap">
+  <table>
+    <thead><tr><th>Modo</th><th>Quando é usado</th><th>O que fazer no PAR</th><th>Ordem</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Reemitir só o certificado do host</strong><br>(mesma CA raiz)</td>
+          <td>Quando a chave da CA está disponível — <code>HyperV_Replica_RootCA.pfx</code> na pasta
+          do script, ou a CA em <code>LocalMachine\My</code>.</td>
+          <td>Importar apenas o novo <code>.pfx</code>. O par <strong>já confia na raiz</strong>,
+          que não mudou.</td>
+          <td><span style="color:var(--verde)">Livre</span> — cada host pode ser renovado quando der,
+          sem janela de risco.</td></tr>
+      <tr><td><strong>Cadeia nova completa</strong><br>(CA raiz + host)</td>
+          <td>Quando a chave da CA não existe (cadeias criadas antes da v1.1.0) ou por escolha do
+          operador.</td>
+          <td>Importar <code>.cer</code> <strong>e</strong> <code>.pfx</code>, e aplicar
+          <strong>antes</strong> de o primário aplicar.</td>
+          <td><span style="color:var(--amarelo)">Obrigatória</span> — ver os 4 passos abaixo.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p><strong>Ordem no modo cadeia nova:</strong></p>
+  <ol>
+    <li><strong>No primário:</strong> opção 13 → <em>GERAR</em>. Gera os arquivos e
+    <strong>não aplica nada</strong> — o certificado antigo continua ativo.</li>
+    <li>Copiar a pasta do script (com o <code>.cer</code> e o <code>.pfx</code> novos) para o par.</li>
+    <li><strong>No par:</strong> opção 13 → <em>IMPORTAR e aplicar</em>. Instala a raiz nova e passa
+    a confiar nela.</li>
+    <li><strong>Volta no primário:</strong> opção 13 → <em>APLICAR</em>. Antes de trocar, o script roda
+    <code>Test-VMReplicationConnection</code> com o thumbprint novo; se o par ainda não estiver
+    pronto, ele <strong>aborta sem alterar nada</strong>.</li>
+  </ol>
+
+  <p>O diagnóstico que abre a opção 13 mostra o certificado do estado, o que o servidor Replica usa
+  e o thumbprint de cada VM — divergência entre eles em amarelo. Os arquivos substituídos são
+  preservados como <code>*.anterior_&lt;data&gt;</code>, e o certificado antigo só é removido se
+  você pedir, depois de confirmar a saúde da replicação nos dois hosts.</p>
 </section>
 
 <!-- ============================================================ -->
@@ -648,6 +703,20 @@
     <p><strong>CA raiz</strong> (parte pública, sem chave privada) — instalada em Autoridades de
     Certificação Raiz Confiáveis em todos os hosts. Sem ela o certificado do host não encadeia
     e a replicação é recusada.</p>
+  </div></div>
+  <div class="arquivo"><span class="icone">🔑</span><div>
+    <code>HyperV_Replica_RootCA.pfx</code>
+    <p><strong>Chave privada da CA raiz</strong>, protegida pela mesma senha. É o que permite
+    <strong>renovar</strong> o certificado do host (opção 13) mantendo a raiz — sem este arquivo a CA
+    não pode mais assinar nada e toda renovação exige cadeia nova nos dois hosts.
+    Ele autoriza a emissão de certificados confiáveis pela topologia: guarde com o cuidado de uma
+    senha de administrador e <strong>não</strong> o distribua junto com o secundário se não for
+    renovar de lá.</p>
+  </div></div>
+  <div class="arquivo"><span class="icone">🗄️</span><div>
+    <code>*.anterior_AAAAMMDD_HHMMSS</code>
+    <p>Versões substituídas pela renovação (opção 13). Ficam para trás como caminho de volta —
+    apague só depois que a replicação estiver saudável nos dois hosts.</p>
   </div></div>
   <div class="arquivo"><span class="icone">📊</span><div>
     <code>Dashboard_Replica_AAAAMMDD_HHMMSS.html</code> · <code>Replica_Monitor_AAAAMMDD_HHMMSS.csv</code>

@@ -66,7 +66,8 @@ VLANs, não acrescenta).
   HTTPS, firewall, instalação da função com resume pós-reboot via
   `Estado_Replica_<HOST>.json`), administração (habilitar replicação, failover
   de teste/planejado/não planejado, replicação estendida) e monitoramento
-  (dashboard HTML, eventos VMMS, CSV). Atenção: os nomes REAIS das propriedades
+  (dashboard HTML, eventos VMMS, CSV) e **renovação de certificado** (Menu 2 →
+  13) em duas fases com trava de `Test-VMReplicationConnection`. Atenção: os nomes REAIS das propriedades
   de `Get-VMReplication` são `PrimaryServerName`/`ReplicaServerName`/
   `ReplicationFrequencySec`/`ReplicationRelationshipType` (os cabeçalhos da
   tabela do cmdlet são abreviações, não os nomes das propriedades).
