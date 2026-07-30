@@ -628,6 +628,43 @@
     <li>A replicação continua funcionando — agora no sentido inverso. Para voltar, repita o processo.</li>
   </ol>
 
+  <h3>Voltar ao servidor original (failback) sem perder as alterações</h3>
+  <p>Depois da manutenção, devolver a VM ao host original é <strong>outro failover planejado</strong>,
+  na direção oposta — a mesma opção 6. Como a direção já foi revertida, o script identifica os papéis
+  novos automaticamente: quem hoje executa a VM entra pelo ramo "primário".</p>
+  <ol>
+    <li><strong>Confirme a saúde antes de qualquer coisa</strong> (Menu 2 → 3, no host que executa a
+    VM): o estado precisa estar <code>Replicating</code>. Se estiver aguardando replicação inicial,
+    rode o Menu 2 → 2 e espere. A partir da v1.1.1 o script faz essa checagem sozinho
+    <strong>antes</strong> de desligar a VM.</li>
+    <li><strong>No host que executa a VM hoje</strong> — Menu 2 → 6: desliga a VM e replica
+    <em>todas</em> as pendências (<code>Start-VMFailover -Prepare</code>). É este passo que garante
+    <strong>zero perda</strong>: as alterações feitas durante a manutenção vão para o outro lado
+    antes do chaveamento.</li>
+    <li><strong>No host original</strong> — a mesma opção 6: failover, reversão da direção e
+    inicialização da VM. Ele volta a ser o primário e o outro volta a ser a replica.
+    <br><strong>Não se assuste com o estado:</strong> deste lado o estado continua
+    <code>Replicating</code> — é o normal. O <code>PreparedForFailover</code> aparece no
+    <em>primário</em> depois do <code>-Prepare</code>; a replica só muda de estado (para
+    <code>FailedOver</code>) quando o failover é executado nela
+    (<a style="color:var(--cyan)" href="https://learn.microsoft.com/windows-server/virtualization/hyper-v/replication-failover">doc oficial</a>).</li>
+    <li>Valide: Menu 2 → 3 nos dois hosts, confira os dados dentro da VM e
+    <strong>reconecte o adaptador de rede</strong> se necessário.</li>
+  </ol>
+  <p class="mudo">Observação: o campo <code>Papel</code> do <code>Estado_Replica_&lt;HOST&gt;.json</code>
+  continua registrando o papel da implantação inicial — ele orienta a etapa de certificado e o
+  checklist, não o sentido atual da replicação. O sentido real é sempre o que o Menu 2 → 3 mostra.</p>
+  <p><strong>Em HTTPS, a reversão exige o certificado explicitamente.</strong> Ao inverter a direção
+  o Hyper-V cria um relacionamento novo, e quem apresenta o certificado passa a ser o host que
+  assumiu como primário — o thumbprint do relacionamento antigo não é herdado. O script resolve isso
+  sozinho (passa <code>-CertificateThumbprint</code> do certificado local, validado antes).</p>
+  <p>Vale saber que <strong>não é peculiaridade do script</strong>: no Hyper-V Manager, a caixa
+  <em>"Reverse the replication direction after failover"</em> do failover planejado falha com o
+  mesmo erro, porque ela também não oferece onde escolher o certificado. Pela GUI, o caminho correto
+  é o assistente separado: botão direito na VM → <em>Replication</em> → <em>Reverse Replication</em>,
+  cuja aba <em>Replication Connection</em> tem o botão <em>Select</em> do certificado
+  (<a style="color:var(--cyan)" href="https://learn.microsoft.com/windows-server/virtualization/hyper-v/replication-failover">documentação oficial</a>).</p>
+
   <h3>Failover não planejado — o primário caiu</h3>
   <p class="mudo">Impacto: possível perda das alterações desde a última replicação (até o intervalo configurado).
   Quando usar: somente com o primário indisponível.</p>
@@ -757,6 +794,17 @@
           <code>Import-Certificate -FilePath .\HyperV_Replica_RootCA.cer -CertStoreLocation Cert:\LocalMachine\Root</code>.
           A partir da v1.0.1 a etapa 10 detecta e reinstala isso sozinha, e o checklist
           (Menu 3 → 6) traz o item <em>"CA raiz em Autoridades Raiz Confiáveis"</em>.</td></tr>
+      <tr><td>"Um novo certificado precisa ser especificado para inverter a replicação"<br>
+          <span style="color:var(--cinza)">(ao reverter a direção após o failover)</span></td>
+          <td>Reverter a direção cria um relacionamento <strong>novo</strong> no sentido oposto, e
+          quem apresenta o certificado passa a ser o host que assumiu como primário. O Hyper-V não
+          herda o thumbprint do relacionamento antigo — ele tem de ser informado.</td>
+          <td>Use o Menu 2 → 6 (a partir da v1.1.1 o script resolve e passa o thumbprint deste host
+          automaticamente). <strong>Na GUI:</strong> a caixa <em>"Reverse the replication direction
+          after failover"</em> do failover planejado falha do mesmo jeito, porque também não pede
+          certificado. O caminho que funciona é o assistente separado — botão direito na VM →
+          <em>Replication</em> → <em>Reverse Replication</em> → aba <em>Replication Connection</em> →
+          <em>Select</em> para escolher o certificado.</td></tr>
       <tr><td>FQDN do par não resolve (workgroup)</td>
           <td>Entrada ausente no arquivo hosts ou sufixo DNS não aplicado</td>
           <td>Reexecute o Menu 1 (etapa 7 é idempotente) ou confira

@@ -27,6 +27,16 @@
 #             aplicação atualiza o servidor Replica E o thumbprint de
 #             CADA VM replicada, com Test-VMReplicationConnection como
 #             trava antes da troca.
+#             1.1.1 — CORREÇÃO (teste em campo): a reversão da direção no
+#             failover planejado falhava em HTTPS com "Um novo certificado
+#             precisa ser especificado para inverter a replicação".
+#             'Set-VMReplication -Reverse' EXIGE -CertificateThumbprint
+#             quando a autenticação é por certificado, porque a inversão
+#             cria um relacionamento novo e quem apresenta o certificado
+#             passa a ser o host que assume como primário. Nova função
+#             Get-ThumbprintLocalReplicacao resolve e valida o thumbprint
+#             local, e o roteiro de reversão do failover NÃO PLANEJADO já
+#             sai com o parâmetro preenchido.
 # ============================================================
 #
 #  COMO USAR EM CAMPO:
@@ -2366,6 +2376,139 @@ function Stop-TesteFailover {
 }
 
 # ------------------------------------------------------------
+# Thumbprint que ESTE host deve APRESENTAR ao inverter a direção da
+# replicação (Set-VMReplication -Reverse).
+#
+# Por que é obrigatório: reverter cria um relacionamento NOVO no sentido
+# oposto, e quem apresenta o certificado passa a ser este host. O Hyper-V
+# NÃO herda o thumbprint do relacionamento antigo e recusa com:
+#   "A máquina virtual está usando autenticação baseada em certificado.
+#    Um novo certificado precisa ser especificado para inverter a
+#    replicação."
+# A documentação do cmdlet não menciona isso — o Exemplo 4 mostra
+# 'Set-VMReplication VM01 -Reverse' puro, que só vale para KERBEROS.
+# Fonte: https://learn.microsoft.com/powershell/module/hyper-v/set-vmreplication
+#
+# NÃO é limitação do script: no Hyper-V Manager a caixa "Reverse the
+# replication direction after failover" do failover planejado tem o MESMO
+# problema, porque ela também não pede certificado — e falha igual. O
+# caminho que funciona na GUI é o assistente separado (botão direito na
+# VM -> Replication -> Reverse Replication), cuja aba "Replication
+# Connection" traz o "Select" para ESCOLHER o certificado. É exatamente
+# isso que esta função automatiza aqui.
+# Fonte: https://learn.microsoft.com/windows-server/virtualization/hyper-v/replication-failover
+#
+# Procura em ordem: estado da implantação -> servidor Replica -> o
+# relacionamento atual da VM; e só aceita um thumbprint que exista em
+# LocalMachine\My e passe na validação para ESTE host.
+# ------------------------------------------------------------
+function Get-ThumbprintLocalReplicacao {
+    param([string]$VMName = "")
+
+    $candidatos = @()
+    $estado = Get-EstadoImplantacao
+    if ($estado.CertificadoThumbprint) { $candidatos += [string]$estado.CertificadoThumbprint }
+
+    $cfg = Get-VMReplicationServer -ErrorAction SilentlyContinue
+    if ($null -ne $cfg -and -not [string]::IsNullOrWhiteSpace([string]$cfg.CertificateThumbprint)) {
+        $candidatos += [string]$cfg.CertificateThumbprint
+    }
+    if (-not [string]::IsNullOrWhiteSpace($VMName)) {
+        $r = Get-VMReplication -VMName $VMName -ErrorAction SilentlyContinue
+        if ($null -ne $r -and -not [string]::IsNullOrWhiteSpace([string]$r.CertificateThumbprint)) {
+            $candidatos += [string]$r.CertificateThumbprint
+        }
+    }
+
+    foreach ($tp in @($candidatos | Select-Object -Unique)) {
+        $cert = Get-CertificadoInstalado -Thumbprint $tp
+        if (-not $cert) { continue }
+        $val = Test-CertificadoReplica -Certificado $cert -FqdnEsperado (Get-HostFqdn)
+        if ($val.Valido) { return $tp }
+        Write-Status -Tipo AVISO -Mensagem "Certificado $tp existe, mas não serve para este host:"
+        foreach ($m in $val.Motivos) { Write-Host "         . $m" -ForegroundColor Yellow }
+    }
+    return $null
+}
+
+# ------------------------------------------------------------
+# Pré-checagem do lado PRIMÁRIO antes de um failover planejado.
+#
+# Roda ANTES de desligar a VM, de propósito: se a replicação não estiver
+# saudável, 'Start-VMFailover -Prepare' falha — e falhar DEPOIS de a VM
+# já estar desligada é o pior dos mundos (indisponibilidade sem failover).
+# Importa especialmente no RETORNO (failback): recém-invertida a direção,
+# a replicação pode ainda estar em replicação inicial.
+# ------------------------------------------------------------
+function Test-ProntoParaFailoverPlanejado {
+    param([Parameter(Mandatory = $true)]$Replicacao)
+
+    $estadoRep = [string]$Replicacao.ReplicationState
+    $saude     = [string]$Replicacao.ReplicationHealth
+    $par       = [string]$Replicacao.ReplicaServerName
+
+    if ([string]::IsNullOrWhiteSpace($par)) {
+        Write-Status -Tipo ERRO -Mensagem "A VM não tem servidor Replica configurado — não há para onde fazer failover."
+        Write-Host "         Se você acabou de reverter a direção, confirme a reversão (Menu 2 > 3)." -ForegroundColor Red
+        return $false
+    }
+
+    # Estados em que a preparação NÃO tem como funcionar
+    $bloqueiam = @('Disabled', 'Error', 'ReadyForInitialReplication',
+                   'WaitingForInitialReplication', 'InitialReplicationInProgress')
+    if ($estadoRep -in $bloqueiam) {
+        Write-Status -Tipo ERRO -Mensagem "Estado da replicação: '$estadoRep' — o failover planejado exige replicação ATIVA."
+        if ($estadoRep -in @('ReadyForInitialReplication', 'WaitingForInitialReplication')) {
+            Write-Host "         A replicação inicial no sentido atual ainda não foi feita."   -ForegroundColor Red
+            Write-Host "         Rode o Menu 2 > 2 (Iniciar replicação inicial) e aguarde"     -ForegroundColor Red
+            Write-Host "         chegar a 'Replicating' antes de tentar o failover."           -ForegroundColor Red
+        } elseif ($estadoRep -eq 'InitialReplicationInProgress') {
+            Write-Host "         A replicação inicial está em ANDAMENTO — aguarde concluir."   -ForegroundColor Red
+        }
+        Write-Status -Tipo INFO -Mensagem "Nada foi alterado e a VM continua ligada."
+        return $false
+    }
+
+    if ($saude -eq 'Critical') {
+        Write-Status -Tipo ERRO -Mensagem "Saúde da replicação: CRÍTICA. Resolva antes de desligar a VM."
+        Write-Host "         Veja os eventos em Menu 3 > 3 e o status em Menu 2 > 3." -ForegroundColor Red
+        return $false
+    }
+
+    # Quanto ainda falta enviar — o Prepare vai empurrar isso para o par
+    $pendenteMB = $null
+    try {
+        $medida = Measure-VMReplication -VMName $Replicacao.VMName -ErrorAction Stop | Select-Object -First 1
+        if ($null -ne $medida -and $medida.PendingReplicationSize -gt 0) {
+            $pendenteMB = [math]::Round($medida.PendingReplicationSize / 1MB, 2)
+        }
+    } catch { }
+
+    Write-Host ""
+    Write-Host "  ── Pré-checagem do failover planejado ──────────────────" -ForegroundColor DarkCyan
+    Write-Host ("  Destino          : {0}" -f $par)        -ForegroundColor White
+    Write-Host ("  Estado           : {0}" -f $estadoRep)  -ForegroundColor White
+    Write-Host ("  Saúde            : {0}" -f $saude)      -ForegroundColor $(if ($saude -eq 'Normal') { 'Green' } else { 'Yellow' })
+    if ($null -ne $pendenteMB) {
+        Write-Host ("  Pendente de envio: {0} MB (será replicado na preparação)" -f $pendenteMB) -ForegroundColor White
+    }
+    Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkCyan
+
+    if ($estadoRep -ne 'Replicating') {
+        Write-Host ""
+        Write-Status -Tipo AVISO -Mensagem "O estado esperado para um failover planejado é 'Replicating'."
+        if (-not (Read-Confirmacao -Pergunta "Prosseguir mesmo com o estado '$estadoRep'?" -Padrao 'N')) {
+            Write-Status -Tipo AVISO -Mensagem "Operação cancelada — a VM continua ligada."
+            return $false
+        }
+    }
+    if ($saude -ne 'Normal') {
+        Write-Status -Tipo AVISO -Mensagem "Saúde '$saude': o failover é possível, mas verifique os eventos depois."
+    }
+    return $true
+}
+
+# ------------------------------------------------------------
 # OPÇÃO 2.6 — Failover PLANEJADO (guiado, sem perda de dados)
 # ------------------------------------------------------------
 function Invoke-FailoverPlanejado {
@@ -2394,7 +2537,12 @@ function Invoke-FailoverPlanejado {
     try {
         if ($modo -eq 'Primary') {
             # ---------------- LADO PRIMÁRIO ----------------
+            # Checa ANTES de desligar: falhar depois deixaria a VM parada
+            # sem failover nenhum.
+            if (-not (Test-ProntoParaFailoverPlanejado -Replicacao $rep)) { return }
+
             Write-Host ""
+            Write-Status -Tipo INFO -Mensagem "A VM voltará a ser REPLICA deste host ao final, recebendo de '$([string]$rep.ReplicaServerName)'."
             Write-Status -Tipo AVISO -Mensagem "A VM '$vmEscolhida' será DESLIGADA para o failover planejado."
             if (-not (Confirm-Operacao -Mensagem "Desligar a VM e preparar o failover AGORA?")) {
                 Write-Status -Tipo AVISO -Mensagem "Operação cancelada."
@@ -2423,23 +2571,82 @@ function Invoke-FailoverPlanejado {
             # ---------------- LADO REPLICA ----------------
             $estadoRep = [string]$rep.ReplicationState
             Write-Host ""
-            if ($estadoRep -notlike '*Prepared*' -and $estadoRep -ne 'PreparedForFailover') {
-                Write-Status -Tipo AVISO -Mensagem "Estado atual: '$estadoRep'. Se a preparação no PRIMÁRIO ainda não"
-                Write-Host "          foi feita, execute lá primeiro (Menu 2 > 6)." -ForegroundColor Yellow
-                if (-not (Read-Confirmacao -Pergunta "O primário JÁ concluiu a etapa de preparação?" -Padrao 'N')) {
-                    Write-Status -Tipo AVISO -Mensagem "Conclua a preparação no primário e volte aqui."
+
+            # ATENÇÃO — 'PreparedForFailover' é o estado do lado PRIMÁRIO
+            # depois do '-Prepare'. Do lado REPLICA o estado permanece
+            # 'Replicating' até o failover ser executado AQUI, e só então
+            # passa a 'FailedOver'. A versão anterior exigia '*Prepared*'
+            # neste lado e por isso disparava um alarme falso em TODO
+            # failover planejado, levando o operador a duvidar de um
+            # estado perfeitamente saudável.
+            # Fonte: "The primary VM should be in the Prepared for planned
+            # failover replication state. The replica VM should be in the
+            # Failover complete replication state."
+            # https://learn.microsoft.com/windows-server/virtualization/hyper-v/replication-failover
+            $bloqueiam = @('Disabled', 'Error', 'ReadyForInitialReplication',
+                           'WaitingForInitialReplication', 'InitialReplicationInProgress')
+            if ($estadoRep -in $bloqueiam) {
+                Write-Status -Tipo ERRO -Mensagem "Estado da replicação neste host: '$estadoRep' — não há como fazer failover."
+                Write-Host "         Confira a saúde da replicação (Menu 2 > 3) antes de continuar." -ForegroundColor Red
+                return
+            }
+
+            # Retomada: se o failover já foi executado e só a reversão ficou
+            # pendente (foi o que aconteceu quando a reversão falhava por
+            # falta do certificado), não tente refazer o failover.
+            $jaFezFailover = ($estadoRep -eq 'FailedOver')
+            if ($jaFezFailover) {
+                Write-Status -Tipo INFO -Mensagem "Esta VM já está em 'FailedOver' neste host — o failover foi feito antes."
+                Write-Host "         Seguindo direto para a reversão da direção e a inicialização da VM." -ForegroundColor Cyan
+            } elseif ($estadoRep -eq 'Replicating') {
+                Write-Status -Tipo INFO -Mensagem "Estado 'Replicating' é o NORMAL deste lado antes do failover."
+                Write-Host "         O estado 'PreparedForFailover' aparece no PRIMÁRIO, não aqui." -ForegroundColor Cyan
+                if (-not (Read-Confirmacao -Pergunta "A preparação no PRIMÁRIO terminou com [OK]?" -Padrao 'S')) {
+                    Write-Status -Tipo AVISO -Mensagem "Conclua a preparação no primário (Menu 2 > 6) e volte aqui."
+                    return
+                }
+            } else {
+                Write-Status -Tipo AVISO -Mensagem "Estado atual deste lado: '$estadoRep' (o esperado é 'Replicating')."
+                if (-not (Read-Confirmacao -Pergunta "Prosseguir com o failover mesmo assim?" -Padrao 'N')) {
+                    Write-Status -Tipo AVISO -Mensagem "Operação cancelada."
                     return
                 }
             }
-            if (-not (Confirm-Operacao -Mensagem "Executar o failover de '$vmEscolhida' NESTE servidor?")) {
-                Write-Status -Tipo AVISO -Mensagem "Operação cancelada."
-                return
+
+            if (-not $jaFezFailover) {
+                if (-not (Confirm-Operacao -Mensagem "Executar o failover de '$vmEscolhida' NESTE servidor?")) {
+                    Write-Status -Tipo AVISO -Mensagem "Operação cancelada."
+                    return
+                }
+                Start-VMFailover -VMName $vmEscolhida -Confirm:$false -ErrorAction Stop
+                Write-Status -Tipo OK -Mensagem "Failover executado — esta cópia assumirá como PRIMÁRIA."
             }
-            Start-VMFailover -VMName $vmEscolhida -Confirm:$false -ErrorAction Stop
-            Write-Status -Tipo OK -Mensagem "Failover executado — esta cópia assumirá como PRIMÁRIA."
             if (Read-Confirmacao -Pergunta "REVERTER a direção da replicação agora (recomendado)?" -Padrao 'S') {
-                Set-VMReplication -VMName $vmEscolhida -Reverse -ErrorAction Stop
-                Write-Status -Tipo OK -Mensagem "Direção revertida — este servidor agora é o PRIMÁRIO da VM."
+                $parametrosRev = @{ VMName = $vmEscolhida; Reverse = $true; ErrorAction = 'Stop' }
+                $reverter      = $true
+
+                # Com certificado, a reversão EXIGE o thumbprint deste host —
+                # sem ele o VMMS recusa a inversão (ver Get-ThumbprintLocalReplicacao).
+                if ([string]$rep.AuthenticationType -eq 'Certificate') {
+                    $tpLocal = Get-ThumbprintLocalReplicacao -VMName $vmEscolhida
+                    if ($tpLocal) {
+                        $parametrosRev['CertificateThumbprint'] = $tpLocal
+                        Write-Status -Tipo INFO -Mensagem "Certificado deste host para o novo sentido: $tpLocal"
+                    } else {
+                        $reverter = $false
+                        Write-Status -Tipo ERRO -Mensagem "Nenhum certificado válido encontrado neste host para a reversão."
+                        Write-Host "         O failover JÁ foi executado — a VM está aqui e nada foi perdido."   -ForegroundColor Yellow
+                        Write-Host "         Corrija o certificado (Menu 1 etapa 10, ou Menu 2 > 13) e reverta"   -ForegroundColor Yellow
+                        Write-Host "         depois com:"                                                        -ForegroundColor Yellow
+                        Write-Host "           `$tp = (Get-VMReplicationServer).CertificateThumbprint"            -ForegroundColor White
+                        Write-Host "           Set-VMReplication -VMName '$vmEscolhida' -Reverse -CertificateThumbprint `$tp" -ForegroundColor White
+                    }
+                }
+
+                if ($reverter) {
+                    Set-VMReplication @parametrosRev
+                    Write-Status -Tipo OK -Mensagem "Direção revertida — este servidor agora é o PRIMÁRIO da VM."
+                }
             }
             if (Read-Confirmacao -Pergunta "Ligar a VM '$vmEscolhida' agora?" -Padrao 'S') {
                 Start-VM -Name $vmEscolhida -ErrorAction Stop
@@ -2520,9 +2727,32 @@ function Invoke-FailoverNaoPlanejado {
         }
         Write-Host ""
         Write-Host "  ─── ROTEIRO DE REVERSÃO (quando o primário voltar) ─────" -ForegroundColor Yellow
+
+        # Em HTTPS a reversão exige o thumbprint deste host: o roteiro já sai
+        # com o valor preenchido, senão o operador reproduz o erro
+        # "Um novo certificado precisa ser especificado para inverter a replicação".
+        $sufixoCert = ""
+        $usaCert = ($null -ne $rep -and [string]$rep.AuthenticationType -eq 'Certificate')
+        if ($usaCert) {
+            $tpLocal = Get-ThumbprintLocalReplicacao -VMName $vmEscolhida
+            if ($tpLocal) {
+                $sufixoCert = " -CertificateThumbprint $tpLocal"
+            } else {
+                $sufixoCert = " -CertificateThumbprint <thumbprint do certificado DESTE host>"
+            }
+        }
+        $fqdnPrimarioOrig = "<FQDN do primário original>"
+        $hostPrim = @((Get-EstadoImplantacao).Topologia) | Where-Object { $_.Funcao -eq 'Primario' } | Select-Object -First 1
+        if ($hostPrim -and $hostPrim.Fqdn) { $fqdnPrimarioOrig = $hostPrim.Fqdn }
+
         Write-Host "  1. No PRIMÁRIO original:  Set-VMReplication -VMName '$vmEscolhida' -AsReplica" -ForegroundColor White
-        Write-Host "  2. NESTE servidor:        Set-VMReplication -VMName '$vmEscolhida' -Reverse -ReplicaServerName '<FQDN do primário original>'" -ForegroundColor White
+        Write-Host ("  2. NESTE servidor:        Set-VMReplication -VMName '{0}' -Reverse -ReplicaServerName '{1}'{2}" -f $vmEscolhida, $fqdnPrimarioOrig, $sufixoCert) -ForegroundColor White
         Write-Host "  3. NESTE servidor:        Start-VMInitialReplication -VMName '$vmEscolhida'" -ForegroundColor White
+        if ($usaCert) {
+            Write-Host "  A autenticação é por CERTIFICADO: o passo 2 SEM -CertificateThumbprint" -ForegroundColor Cyan
+            Write-Host "  falha, porque a reversão cria um relacionamento novo e quem apresenta"  -ForegroundColor Cyan
+            Write-Host "  o certificado passa a ser ESTE host."                                  -ForegroundColor Cyan
+        }
         Write-Host "  Depois, um failover PLANEJADO devolve a VM ao servidor original." -ForegroundColor DarkGray
         Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor Yellow
     } catch {
