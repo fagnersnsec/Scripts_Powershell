@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Manual — Automatiza_Hyper-v_Replica.ps1</title>
+<style>
+  :root {
+    --bg:        #0d1117;
+    --bg-soft:   #161b22;
+    --bg-card:   #1c2129;
+    --borda:     #30363d;
+    --texto:     #e6edf3;
+    --texto-2:   #9ca3af;
+    --cyan:      #58a6ff;
+    --verde:     #3fb950;
+    --amarelo:   #d29922;
+    --vermelho:  #f85149;
+    --roxo:      #bc8cff;
+    --mono: "Cascadia Code", "Cascadia Mono", Consolas, "Courier New", monospace;
+    --sans: "Segoe UI", "Segoe UI Semibold", system-ui, sans-serif;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--texto);
+    line-height: 1.65;
+    background-image:
+      radial-gradient(ellipse 900px 420px at 85% -80px, rgba(88,166,255,.09), transparent),
+      radial-gradient(ellipse 700px 380px at 0% 110%, rgba(63,185,80,.05), transparent);
+    background-attachment: fixed;
+  }
+
+  /* ---------- Barra de navegação fixa ---------- */
+  nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(13,17,23,.92);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--borda);
+    padding: 0 24px;
+    display: flex; align-items: center; gap: 4px;
+    overflow-x: auto; white-space: nowrap;
+  }
+  nav .logo {
+    font-family: var(--mono); font-size: .8rem; font-weight: 700;
+    color: var(--verde); padding: 14px 16px 14px 0; margin-right: 8px;
+    border-right: 1px solid var(--borda);
+  }
+  nav a {
+    color: var(--texto-2); text-decoration: none; font-size: .8rem;
+    padding: 14px 11px; letter-spacing: .3px;
+    border-bottom: 2px solid transparent; transition: color .15s, border-color .15s;
+  }
+  nav a:hover { color: var(--cyan); border-bottom-color: var(--cyan); }
+
+  /* ---------- Cabeçalho hero ---------- */
+  header {
+    padding: 72px 24px 56px;
+    text-align: center;
+    border-bottom: 1px solid var(--borda);
+    background: linear-gradient(160deg, #0d1117 30%, #10161f 75%, #12202c 100%);
+    position: relative; overflow: hidden;
+  }
+  header::before {
+    content: "PS C:\\> .\\Automatiza_Hyper-v_Replica.ps1 _";
+    position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
+    font-family: var(--mono); font-size: .78rem; color: #3d4450;
+    letter-spacing: 1px;
+  }
+  header h1 {
+    font-size: clamp(1.7rem, 4.5vw, 2.7rem); font-weight: 700; letter-spacing: -.5px;
+  }
+  header h1 .destaque { color: var(--cyan); }
+  header .subtitulo { color: var(--texto-2); margin-top: 12px; font-size: 1.02rem; max-width: 720px; margin-left: auto; margin-right: auto; }
+  .selos { margin-top: 26px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .selo {
+    font-family: var(--mono); font-size: .72rem; font-weight: 600;
+    padding: 5px 14px; border-radius: 999px; border: 1px solid var(--borda);
+    background: var(--bg-soft); color: var(--texto-2);
+  }
+  .selo.versao   { color: var(--verde);   border-color: rgba(63,185,80,.4); }
+  .selo.ambiente { color: var(--cyan);    border-color: rgba(88,166,255,.4); }
+  .selo.admin    { color: var(--amarelo); border-color: rgba(210,153,34,.4); }
+
+  /* ---------- Layout principal ---------- */
+  main { max-width: 1060px; margin: 0 auto; padding: 24px 24px 80px; }
+  section { margin-top: 64px; }
+  h2 {
+    font-size: 1.5rem; font-weight: 700; letter-spacing: -.3px;
+    padding-bottom: 10px; margin-bottom: 22px;
+    border-bottom: 1px solid var(--borda);
+    display: flex; align-items: baseline; gap: 12px;
+  }
+  h2 .num {
+    font-family: var(--mono); font-size: .95rem; color: var(--verde); font-weight: 700;
+  }
+  h3 { font-size: 1.08rem; margin: 30px 0 12px; color: var(--cyan); font-weight: 600; }
+  p { margin-bottom: 12px; color: var(--texto); }
+  p.mudo, li.mudo { color: var(--texto-2); }
+  ul, ol { margin: 0 0 14px 24px; }
+  li { margin-bottom: 7px; }
+  strong { color: #fff; }
+  code {
+    font-family: var(--mono); font-size: .86em;
+    background: var(--bg-soft); border: 1px solid var(--borda);
+    padding: 2px 7px; border-radius: 6px; color: var(--cyan);
+  }
+  kbd {
+    font-family: var(--mono); font-size: .8em; font-weight: 700;
+    background: #21262d; border: 1px solid #3d444d; border-bottom-width: 3px;
+    padding: 2px 8px; border-radius: 6px; color: var(--texto);
+  }
+
+  /* ---------- Cards dos menus ---------- */
+  .grade-menus { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 22px 0; }
+  .card-menu {
+    background: var(--bg-card); border: 1px solid var(--borda); border-radius: 14px;
+    padding: 22px; transition: transform .15s, border-color .15s;
+  }
+  .card-menu:hover { transform: translateY(-4px); border-color: var(--cyan); }
+  .card-menu .indice { font-family: var(--mono); font-size: 1.5rem; font-weight: 800; }
+  .card-menu:nth-child(1) .indice { color: var(--verde); }
+  .card-menu:nth-child(2) .indice { color: var(--cyan); }
+  .card-menu:nth-child(3) .indice { color: var(--roxo); }
+  .card-menu h4 { margin: 8px 0 8px; font-size: 1rem; }
+  .card-menu p { font-size: .875rem; color: var(--texto-2); margin: 0; }
+
+  /* ---------- Console simulado ---------- */
+  .console {
+    font-family: var(--mono); font-size: .82rem; line-height: 1.75;
+    background: #010409; border: 1px solid var(--borda); border-radius: 12px;
+    padding: 18px 22px; margin: 16px 0; overflow-x: auto;
+    box-shadow: inset 0 0 40px rgba(0,0,0,.5);
+  }
+  .console::before {
+    content: "● ● ●"; display: block; color: #30363d; letter-spacing: 4px;
+    font-size: .6rem; margin-bottom: 10px;
+  }
+  .console .ok    { color: var(--verde); }
+  .console .aviso { color: var(--amarelo); }
+  .console .erro  { color: var(--vermelho); }
+  .console .info  { color: var(--cyan); }
+  .console .cmd   { color: #fff; }
+  .console .mudo  { color: #6b7280; }
+
+  /* ---------- Timeline do fluxo de campo ---------- */
+  .timeline { margin: 26px 0; position: relative; padding-left: 42px; }
+  .timeline::before {
+    content: ""; position: absolute; left: 15px; top: 8px; bottom: 8px;
+    width: 2px; background: linear-gradient(var(--verde), var(--cyan), var(--roxo));
+  }
+  .passo { position: relative; margin-bottom: 26px; }
+  .passo::before {
+    content: attr(data-n); position: absolute; left: -42px; top: 0;
+    width: 32px; height: 32px; border-radius: 50%;
+    background: var(--bg-soft); border: 2px solid var(--verde);
+    color: var(--verde); font-family: var(--mono); font-weight: 800; font-size: .85rem;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .passo:nth-child(3)::before, .passo:nth-child(4)::before { border-color: var(--cyan); color: var(--cyan); }
+  .passo:nth-child(5)::before, .passo:nth-child(6)::before { border-color: var(--roxo); color: var(--roxo); }
+  .passo h4 { font-size: 1rem; margin-bottom: 4px; }
+  .passo p { font-size: .9rem; color: var(--texto-2); margin: 0; }
+
+  /* ---------- Tabelas ---------- */
+  .tabela-wrap { overflow-x: auto; border: 1px solid var(--borda); border-radius: 12px; margin: 16px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+  thead th {
+    background: var(--bg-soft); text-align: left; padding: 12px 14px;
+    font-size: .72rem; text-transform: uppercase; letter-spacing: 1px; color: var(--texto-2);
+    border-bottom: 1px solid var(--borda); white-space: nowrap;
+  }
+  tbody td { padding: 11px 14px; border-bottom: 1px solid #21262d; vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(88,166,255,.05); }
+  td.centro { text-align: center; }
+
+  /* ---------- Badges de local de execução e estado ---------- */
+  .badge {
+    display: inline-block; font-family: var(--mono); font-size: .68rem; font-weight: 700;
+    padding: 3px 10px; border-radius: 999px; letter-spacing: .5px; white-space: nowrap;
+  }
+  .b-primario { background: rgba(63,185,80,.15);  color: var(--verde);   border: 1px solid rgba(63,185,80,.4); }
+  .b-replica  { background: rgba(88,166,255,.15); color: var(--cyan);    border: 1px solid rgba(88,166,255,.4); }
+  .b-ambos    { background: rgba(188,140,255,.15);color: var(--roxo);    border: 1px solid rgba(188,140,255,.4); }
+  .b-reboot   { background: rgba(248,81,73,.15);  color: var(--vermelho);border: 1px solid rgba(248,81,73,.4); }
+
+  /* ---------- Callouts ---------- */
+  .callout {
+    border-radius: 12px; padding: 14px 18px; margin: 16px 0;
+    border: 1px solid; border-left-width: 5px; font-size: .9rem;
+  }
+  .callout .titulo { font-weight: 700; font-family: var(--mono); font-size: .78rem; letter-spacing: 1px; display: block; margin-bottom: 5px; }
+  .c-info  { background: rgba(88,166,255,.07);  border-color: rgba(88,166,255,.45); }
+  .c-info .titulo  { color: var(--cyan); }
+  .c-aviso { background: rgba(210,153,34,.07);  border-color: rgba(210,153,34,.5); }
+  .c-aviso .titulo { color: var(--amarelo); }
+  .c-erro  { background: rgba(248,81,73,.07);   border-color: rgba(248,81,73,.5); }
+  .c-erro .titulo  { color: var(--vermelho); }
+  .c-ok    { background: rgba(63,185,80,.07);   border-color: rgba(63,185,80,.5); }
+  .c-ok .titulo    { color: var(--verde); }
+
+  /* ---------- Arquivos gerados ---------- */
+  .arquivo {
+    display: flex; gap: 14px; align-items: flex-start;
+    background: var(--bg-card); border: 1px solid var(--borda); border-radius: 10px;
+    padding: 13px 16px; margin-bottom: 10px;
+  }
+  .arquivo .icone { font-size: 1.3rem; line-height: 1.4; }
+  .arquivo code { border: none; background: none; padding: 0; font-weight: 700; }
+  .arquivo p { font-size: .85rem; color: var(--texto-2); margin: 2px 0 0; }
+
+  footer {
+    border-top: 1px solid var(--borda); margin-top: 70px;
+    padding: 28px 24px; text-align: center; font-size: .8rem; color: var(--texto-2);
+  }
+  footer .prompt { font-family: var(--mono); color: var(--verde); }
+
+  @media (max-width: 640px) {
+    header { padding: 56px 16px 40px; }
+    main { padding: 16px 16px 60px; }
+    .timeline { padding-left: 36px; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="logo">HV-REPLICA</span>
+  <a href="#visao">Visão geral</a>
+  <a href="#requisitos">Requisitos</a>
+  <a href="#fluxo">Fluxo de campo</a>
+  <a href="#menu1">Menu 1 · Preparação</a>
+  <a href="#certificado">Certificado</a>
+  <a href="#menu2">Menu 2 · Administração</a>
+  <a href="#failover">Failovers</a>
+  <a href="#menu3">Menu 3 · Monitoramento</a>
+  <a href="#arquivos">Arquivos</a>
+  <a href="#problemas">Problemas</a>
+  <a href="#referencias">Referências</a>
+</nav>
+
+<header>
+  <h1>Manual de Uso<br><span class="destaque">Automatiza_Hyper-v_Replica.ps1</span></h1>
+  <p class="subtitulo">Implantação e gestão completa do <strong>Hyper-V Replica</strong> em projetos de campo —
+  da preparação do servidor (domínio ou workgroup, HTTPS com certificado autoassinado)
+  ao failover e ao monitoramento com dashboard.</p>
+  <div class="selos">
+    <span class="selo versao">v1.0</span>
+    <span class="selo ambiente">Windows Server 2019+</span>
+    <span class="selo ambiente">PowerShell 5.1</span>
+    <span class="selo admin">Executar como Administrador</span>
+  </div>
+</header>
+
+<main>
+
+<!-- ============================================================ -->
+<section id="visao">
+  <h2><span class="num">01</span> Visão geral</h2>
+  <p>O <strong>Hyper-V Replica</strong> é o recurso nativo do Windows Server que mantém uma
+  cópia offline (replica) de cada VM em um segundo host, com envio assíncrono de alterações a cada
+  <strong>30 s, 5 min ou 15 min</strong>. Em caso de desastre no servidor primário, a replica é
+  promovida com poucos cliques — sem storage compartilhado e sem licenciamento adicional.</p>
+  <p>Este script empacota <strong>todo o ciclo de vida</strong> do recurso em três menus interativos:</p>
+
+  <div class="grade-menus">
+    <div class="card-menu">
+      <div class="indice">[1]</div>
+      <h4>Preparar o servidor</h4>
+      <p>12 etapas com detecção do que já foi feito: papel do servidor, domínio/workgroup,
+      certificado HTTPS, firewall, instalação da função Hyper-V com <em>resume</em> pós-reboot
+      e checklist final de saúde.</p>
+    </div>
+    <div class="card-menu">
+      <div class="indice">[2]</div>
+      <h4>Administrar a replicação</h4>
+      <p>Habilitar replicação por VM, replicação inicial (rede/agendada/mídia externa),
+      failover de teste, planejado e não planejado, suspender/retomar,
+      replicação estendida para um 3º servidor.</p>
+    </div>
+    <div class="card-menu">
+      <div class="indice">[3]</div>
+      <h4>Monitorar e reportar</h4>
+      <p>Visão rápida no console, <strong>dashboard HTML</strong> com saúde de todas as VMs,
+      últimos eventos de erro do VMMS, exportação CSV e re-execução do checklist.</p>
+    </div>
+  </div>
+
+  <div class="console">
+<span class="mudo">  ============================================================</span>
+<span class="info">       IMPLANTAÇÃO E GESTÃO DO HYPER-V REPLICA</span>
+<span class="mudo">       Autor: Fagner Nascimento | Microsoft Datacenter</span>
+<span class="mudo">  ============================================================</span>
+
+  <span class="aviso">Selecione a operação desejada:</span>
+
+  <span class="cmd">[1]  PREPARAR este servidor para o Hyper-V Replica</span>
+  <span class="cmd">[2]  ADMINISTRAR o Hyper-V Replica</span>
+  <span class="cmd">[3]  MONITORAMENTO e relatórios</span>
+  <span class="mudo">[0]  Sair</span>
+
+  <span class="cmd">&gt;&gt; Digite a opção: _</span>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="requisitos">
+  <h2><span class="num">02</span> Requisitos</h2>
+  <div class="tabela-wrap">
+  <table>
+    <thead><tr><th>Requisito</th><th>Detalhe</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Sistema operacional</strong></td>
+          <td>Windows Server 2019 ou superior. O Hyper-V Replica <strong>não existe</strong> em
+          Windows 10/11 — o script detecta e bloqueia a execução em SO client.</td></tr>
+      <tr><td><strong>Privilégios</strong></td>
+          <td>PowerShell aberto <strong>como Administrador</strong> (o script valida na entrada).</td></tr>
+      <tr><td><strong>Servidores</strong></td>
+          <td>Mínimo 2 hosts (primário + secundário). Opcional: 3º host para replica estendida.</td></tr>
+      <tr><td><strong>Rede entre os hosts</strong></td>
+          <td>Porta <code>80/TCP</code> (Kerberos/HTTP) ou <code>443/TCP</code> (Certificado/HTTPS)
+          liberada entre os servidores, nos dois sentidos.</td></tr>
+      <tr><td><strong>Identidade</strong></td>
+          <td><strong>Domínio</strong>: todos os hosts no mesmo domínio AD (ou domínios confiáveis) → pode usar Kerberos.<br>
+          <strong>Workgroup</strong>: autenticação por <strong>certificado é obrigatória</strong>, e o
+          nome do workgroup deve ser <strong>idêntico</strong> em todos os servidores.</td></tr>
+      <tr><td><strong>Armazenamento</strong></td>
+          <td>Pasta local no(s) servidor(es) de destino para receber as replicas (ex.: <code>D:\Replicas</code>),
+          com espaço para os discos das VMs replicadas.</td></tr>
+      <tr><td><strong>Função Hyper-V</strong></td>
+          <td>Se ausente, o próprio script oferece a instalação (<code>Install-WindowsFeature</code>)
+          — exige <strong>uma reinicialização</strong>.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout c-aviso">
+    <span class="titulo">⚠ KERBEROS NÃO CRIPTOGRAFA</span>
+    Com Kerberos (HTTP/80) o tráfego de replicação viaja <strong>sem criptografia</strong>.
+    Se os dados atravessam redes não confiáveis (link entre sites, por exemplo),
+    prefira Certificado (HTTPS/443) mesmo em ambiente de domínio.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="fluxo">
+  <h2><span class="num">03</span> Fluxo de implantação em campo</h2>
+  <p>A ordem de execução importa: o servidor <strong>primário gera o certificado e registra a topologia</strong>;
+  os demais servidores importam esse material a partir da própria pasta do script.</p>
+
+  <div class="timeline">
+    <div class="passo" data-n="1">
+      <h4>No servidor PRIMÁRIO — Menu 1</h4>
+      <p>Execute a preparação completa. Informe o papel <em>Primário</em>, o ambiente
+      (domínio/workgroup) e os FQDN + IP de <strong>todos</strong> os servidores da topologia.
+      Em HTTPS, o certificado é gerado aqui, com o FQDN de todos os hosts no SAN,
+      e exportado para <code>HyperV_Replica_Cert.pfx</code> na pasta do script.</p>
+    </div>
+    <div class="passo" data-n="2">
+      <h4>Copie a PASTA DO SCRIPT para o secundário</h4>
+      <p>Leve a pasta inteira (script + <code>.pfx</code> + <code>.cer</code>) por pendrive ou
+      compartilhamento. <strong>Anote a senha do PFX</strong> — ela será pedida na importação e
+      nunca é gravada em disco.</p>
+    </div>
+    <div class="passo" data-n="3">
+      <h4>No servidor SECUNDÁRIO — Menu 1</h4>
+      <p>Execute a preparação informando o papel <em>Secundário</em>. O script detecta o PFX
+      na pasta, pede a senha, valida o certificado (EKU, SAN, validade) e conclui
+      firewall + servidor replica + autorizações.</p>
+    </div>
+    <div class="passo" data-n="4">
+      <h4>(Opcional) Servidor ESTENDIDO — Menu 1</h4>
+      <p>Mesmo processo do secundário, com papel <em>Estendido</em>, para a topologia de
+      3 níveis: primário → replica → estendido.</p>
+    </div>
+    <div class="passo" data-n="5">
+      <h4>De volta ao PRIMÁRIO — Menu 2, opção 1</h4>
+      <p>Habilite a replicação de cada VM (frequência, pontos de recuperação, VSS, compressão)
+      e dispare a replicação inicial.</p>
+    </div>
+    <div class="passo" data-n="6">
+      <h4>Valide — Menu 2 opção 4 e Menu 3</h4>
+      <p>Faça um <strong>teste de failover</strong> no replica (não afeta a produção) e gere o
+      <strong>dashboard HTML</strong> para registrar a saúde do ambiente na entrega do projeto.</p>
+    </div>
+  </div>
+
+  <div class="callout c-info">
+    <span class="titulo">ℹ REEXECUTAR É SEGURO</span>
+    Todas as etapas são idempotentes: o que já está configurado é detectado e exibido como
+    <code>[OK] ... (já configurado — pulando)</code>. Se um reboot interromper o processo,
+    basta executar o script novamente — ele continua de onde parou usando o arquivo de estado.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="menu1">
+  <h2><span class="num">04</span> Menu 1 — Preparação do servidor</h2>
+  <p>A preparação percorre <strong>12 etapas numeradas</strong>. Cada uma valida o estado real do
+  servidor antes de agir (o arquivo de estado nunca prevalece sobre a realidade).</p>
+
+  <div class="tabela-wrap">
+  <table>
+    <thead><tr><th>Etapa</th><th>O que faz</th><th>Observações</th></tr></thead>
+    <tbody>
+      <tr><td class="centro"><strong>1</strong></td><td>Valida o sistema operacional</td><td>Bloqueia Windows client.</td></tr>
+      <tr><td class="centro"><strong>2</strong></td><td>Valida elevação (Administrador)</td><td></td></tr>
+      <tr><td class="centro"><strong>3</strong></td><td>Carrega o estado e oferece <em>continuar implantação anterior</em></td><td>Recusar arquiva o estado antigo como <code>.bak</code>.</td></tr>
+      <tr><td class="centro"><strong>4</strong></td><td>Define o papel: Primário / Secundário / Estendido</td><td>Recomendação exibida: primário primeiro.</td></tr>
+      <tr><td class="centro"><strong>5</strong></td><td>Define o ambiente: Domínio ou Workgroup</td><td>Escolher Domínio sem estar ingressado gera erro orientado.</td></tr>
+      <tr><td class="centro"><strong>6</strong></td><td>Coleta a topologia (FQDN + IP de cada host)</td><td>Os FQDNs alimentam certificado, hosts e autorizações.</td></tr>
+      <tr><td class="centro"><strong>7</strong></td><td>Workgroup: nome do grupo, sufixo DNS primário e arquivo hosts</td><td><span class="badge b-reboot">REBOOT</span> se o workgroup for alterado.</td></tr>
+      <tr><td class="centro"><strong>8</strong></td><td>Instala a função Hyper-V se ausente</td><td><span class="badge b-reboot">REBOOT</span> obrigatório após instalar.</td></tr>
+      <tr><td class="centro"><strong>9</strong></td><td>Define a autenticação</td><td>Workgroup força Certificado; domínio escolhe Kerberos ou Certificado.</td></tr>
+      <tr><td class="centro"><strong>10</strong></td><td>Certificado: gera (primário) ou importa (demais)</td><td>Detalhes na <a href="#certificado" style="color:var(--cyan)">seção 05</a>.</td></tr>
+      <tr><td class="centro"><strong>11</strong></td><td>Firewall + pasta de replicas + autorização + <code>Set-VMReplicationServer</code></td><td>Oferecida também ao primário (failover reverso).</td></tr>
+      <tr><td class="centro"><strong>12</strong></td><td>Checklist final de saúde</td><td>Cada requisito impresso como <code>[OK]</code> ou <code>[ERRO]</code>.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Retomada após reboot (resume)</h3>
+  <p>Antes de qualquer reinicialização o script grava
+  <code>Estado_Replica_&lt;HOSTNAME&gt;.json</code> com o motivo pendente. Na próxima execução:</p>
+  <div class="console">
+<span class="cmd">  [Etapa 3/12] Estado da implantação</span>
+<span class="info">  [INFO] Reinicialização pendente registrada: Instalacao Hyper-V (2026-07-29 14:02:11)</span>
+<span class="ok">  [OK] Hyper-V instalado com sucesso após o reboot — continuando.</span>
+<span class="ok">  [OK] Papel já definido: Secundario (pulando).</span>
+<span class="ok">  [OK] Ambiente já definido: Workgroup (pulando).</span>
+  </div>
+
+  <div class="callout c-aviso">
+    <span class="titulo">⚠ AUTORIZAÇÃO GRANULAR É O PADRÃO RECOMENDADO</span>
+    Na etapa 11 o script pergunta se o host aceita replicação de <em>qualquer servidor autenticado</em>
+    ou <em>somente dos servidores da topologia</em>. Escolha a segunda opção sempre que possível —
+    ela cria entradas <code>New-VMReplicationAuthorizationEntry</code> por FQDN e reduz a superfície de ataque.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="certificado">
+  <h2><span class="num">05</span> Certificado HTTPS (workgroup ou criptografia)</h2>
+  <p>Para HTTPS, cada host precisa de um certificado <strong>não expirado</strong>, com
+  <strong>chave privada</strong>, EKU <strong>Client + Server Authentication</strong>, cadeia
+  terminando em <strong>raiz confiável</strong> e <strong>CN/SAN igual ao FQDN do host</strong>.
+  O script atende a tudo isso com ferramentas nativas do Windows:</p>
+
+  <div class="callout c-erro">
+    <span class="titulo">✖ CERTIFICADO AUTOASSINADO NÃO FUNCIONA</span>
+    O Hyper-V Replica <strong>rejeita</strong> um certificado que seja a própria raiz
+    (emissor = requerente), com o erro <code>0x80092007</code> — <em>"O certificado especificado
+    é autoassinado"</em>. Ele exige um certificado que <strong>encadeie até</strong> uma raiz.
+    Por isso o script gera uma <strong>cadeia de dois níveis</strong>.
+  </div>
+
+  <h3>Estratégia: uma CA raiz + um certificado com todos os FQDNs</h3>
+  <div class="console">
+<span class="mudo">  [CA raiz]  CN=Hyper-V Replica Root CA        -> LocalMachine\Root  (10 anos)</span>
+<span class="mudo">       |  assina</span>
+<span class="ok">  [Host]     CN=hv01.lab                       -> LocalMachine\My    (5 anos)</span>
+<span class="info">             SAN = hv01.lab, hv02.lab  |  EKU = Server Auth + Client Auth</span>
+  </div>
+  <ul>
+    <li>No <strong>primário</strong>, o script cria a <strong>CA raiz</strong> e depois o certificado
+    do host <strong>assinado por ela</strong> (via <code>New-SelfSignedCertificate -Signer</code>),
+    com o FQDN de <strong>todos os hosts da topologia no SAN</strong> (RSA 2048, SHA-256).</li>
+    <li>A CA raiz vai para <code>LocalMachine\Root</code> (e é removida de "Pessoal", onde não é o lugar dela);
+    o certificado do host fica em <code>LocalMachine\My</code>.</li>
+    <li>Dois arquivos são gerados na pasta do script:
+    <code>HyperV_Replica_RootCA.cer</code> (CA raiz pública) e
+    <code>HyperV_Replica_Cert.pfx</code> (certificado do host + chave privada, protegido por senha).
+    <strong>Os dois precisam ser copiados</strong> para os demais servidores.</li>
+    <li>No <strong>secundário/estendido</strong>, o script instala primeiro a CA raiz (sem ela o
+    certificado não encadeia), depois importa o PFX pedindo a senha (até 3 tentativas), e
+    <strong>valida cadeia, EKU, SAN e validade antes de aceitar</strong> — se o FQDN local não
+    estiver no SAN, ele orienta a regenerar a cadeia no primário.</li>
+    <li>Em todos os hosts é gravado
+    <code>DisableCertRevocationCheck = 1</code> em
+    <code>HKLM\...\Virtualization\Replication</code> — obrigatório com CA privada
+    (não há CRL publicada para consultar; KB 2767928).</li>
+  </ul>
+
+  <div class="callout c-erro">
+    <span class="titulo">✖ A SENHA DO PFX NÃO É RECUPERÁVEL</span>
+    A senha é usada apenas em memória e <strong>nunca gravada</strong> em disco ou no arquivo de estado.
+    Se ela se perder antes de preparar o secundário, gere um novo certificado no primário
+    (Menu 1 → etapa 10 → confirmar sobrescrita do PFX).
+  </div>
+
+  <div class="callout c-info">
+    <span class="titulo">ℹ VALIDADE E RENOVAÇÃO</span>
+    O certificado expira em 5 anos. O checklist e o dashboard alertam quando faltarem
+    <strong>menos de 90 dias</strong>. Para renovar: gere um novo no primário, reimporte nos demais
+    hosts e atualize o thumbprint em <code>Set-VMReplicationServer</code>/<code>Set-VMReplication</code>
+    (o próprio Menu 1 refaz isso ao detectar certificado inválido).
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="menu2">
+  <h2><span class="num">06</span> Menu 2 — Administração da replicação</h2>
+  <p>Cada opção indica <strong>em qual servidor deve ser executada</strong> — o script também valida
+  o lado e avisa se você estiver no host errado.</p>
+
+  <div class="tabela-wrap">
+  <table>
+    <thead><tr><th>Opção</th><th>Função</th><th>Executar em</th><th>Notas</th></tr></thead>
+    <tbody>
+      <tr><td class="centro"><strong>1</strong></td><td>Habilitar replicação de uma VM</td>
+          <td><span class="badge b-primario">PRIMÁRIO</span></td>
+          <td>Wizard: destino, frequência (30 s/5 min/15 min), até 24 pontos de recuperação,
+          VSS para cargas como SQL Server, compressão, exclusão de VHDs (ex.: disco de page file).</td></tr>
+      <tr><td class="centro"><strong>2</strong></td><td>Iniciar replicação inicial</td>
+          <td><span class="badge b-primario">PRIMÁRIO</span></td>
+          <td>Agora pela rede, agendada (até 7 dias) ou exportada para mídia externa
+          (links lentos / VMs grandes).</td></tr>
+      <tr><td class="centro"><strong>3</strong></td><td>Status das replicações</td>
+          <td><span class="badge b-ambos">AMBOS</span></td><td>Somente leitura.</td></tr>
+      <tr><td class="centro"><strong>4</strong></td><td>Teste de failover</td>
+          <td><span class="badge b-replica">REPLICA</span></td>
+          <td>Cria a VM <code>&lt;nome&gt; - Test</code> isolada da rede. A produção continua replicando.</td></tr>
+      <tr><td class="centro"><strong>5</strong></td><td>Encerrar teste de failover</td>
+          <td><span class="badge b-replica">REPLICA</span></td>
+          <td><strong>Apaga</strong> a VM de teste e descarta os dados do teste.</td></tr>
+      <tr><td class="centro"><strong>6</strong></td><td>Failover PLANEJADO</td>
+          <td><span class="badge b-ambos">AMBOS</span></td>
+          <td>Guiado: começa no primário, termina no replica. Sem perda de dados. Detalhes na seção 07.</td></tr>
+      <tr><td class="centro"><strong>7</strong></td><td>Failover NÃO PLANEJADO</td>
+          <td><span class="badge b-replica">REPLICA</span></td>
+          <td>Para desastre real. Permite escolher ponto de recuperação; imprime o roteiro de reversão.</td></tr>
+      <tr><td class="centro"><strong>8 / 9</strong></td><td>Suspender / Retomar replicação</td>
+          <td><span class="badge b-ambos">AMBOS</span></td>
+          <td>Útil em janelas de manutenção de rede.</td></tr>
+      <tr><td class="centro"><strong>10</strong></td><td>Alterar configurações</td>
+          <td><span class="badge b-primario">PRIMÁRIO</span></td>
+          <td>Frequência, pontos de recuperação e compressão — mostra os valores atuais antes.</td></tr>
+      <tr><td class="centro"><strong>11</strong></td><td>Remover replicação</td>
+          <td><span class="badge b-ambos">AMBOS</span></td>
+          <td>Confirmação reforçada: exige digitar o nome exato da VM. Remova nos dois lados.</td></tr>
+      <tr><td class="centro"><strong>12</strong></td><td>Replicação ESTENDIDA</td>
+          <td><span class="badge b-replica">REPLICA</span></td>
+          <td>Estende a replica para o 3º servidor (frequência 5 ou 15 min).</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="failover">
+  <h2><span class="num">07</span> Os três tipos de failover</h2>
+
+  <h3>Teste de failover — valide sem medo</h3>
+  <p class="mudo">Impacto na produção: nenhum. Quando usar: validação periódica do plano de DR (recomendado ao
+  menos 1x por trimestre) e na entrega do projeto.</p>
+  <ol>
+    <li>No <strong>replica</strong>: Menu 2 → opção 4 — cria <code>&lt;VM&gt; - Test</code> desconectada da rede.</li>
+    <li>Opcionalmente conecte-a a um switch <strong>isolado</strong> e ligue-a para validar o boot e os serviços.</li>
+    <li>Encerre com a opção 5 — a VM de teste é apagada, nada persiste.</li>
+  </ol>
+
+  <h3>Failover planejado — migração sem perda de dados</h3>
+  <p class="mudo">Impacto: indisponibilidade controlada durante a janela. Quando usar: manutenção do host primário,
+  migração de site, teste de DR "de verdade".</p>
+  <ol>
+    <li><span class="badge b-primario">PRIMÁRIO</span> Menu 2 → opção 6: o script desliga a VM e replica as pendências
+    (<code>Start-VMFailover -Prepare</code>).</li>
+    <li><span class="badge b-replica">REPLICA</span> a mesma opção 6 no outro servidor: failover, reversão da
+    direção da replicação e inicialização da VM.</li>
+    <li>A replicação continua funcionando — agora no sentido inverso. Para voltar, repita o processo.</li>
+  </ol>
+
+  <h3>Failover não planejado — o primário caiu</h3>
+  <p class="mudo">Impacto: possível perda das alterações desde a última replicação (até o intervalo configurado).
+  Quando usar: somente com o primário indisponível.</p>
+  <ol>
+    <li><span class="badge b-replica">REPLICA</span> Menu 2 → opção 7: escolha o ponto de recuperação
+    (o mais recente ou um anterior), ligue a VM e valide.</li>
+    <li>Só então <strong>complete</strong> o failover — completar remove os pontos de recuperação
+    (sem volta a estados anteriores).</li>
+    <li>Quando o primário voltar, siga o <strong>roteiro de reversão</strong> que o script imprime
+    (<code>-AsReplica</code> no antigo primário → <code>-Reverse</code> → replicação inicial → failover planejado de volta).</li>
+  </ol>
+
+  <div class="callout c-erro">
+    <span class="titulo">✖ NUNCA LIGUE A MESMA VM NOS DOIS HOSTS</span>
+    Após um failover não planejado, se o primário original voltar com a VM antiga em execução,
+    haverá conflito de IP/identidade (split-brain). Antes de religar o host recuperado,
+    garanta que a VM antiga esteja desligada e marque-a como replica (<code>Set-VMReplication -AsReplica</code>).
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="menu3">
+  <h2><span class="num">08</span> Menu 3 — Monitoramento e relatórios</h2>
+  <div class="tabela-wrap">
+  <table>
+    <thead><tr><th>Opção</th><th>Função</th></tr></thead>
+    <tbody>
+      <tr><td class="centro"><strong>1</strong></td><td>Visão rápida no console — tabela colorida por saúde
+      (<span style="color:var(--verde)">Normal</span> /
+      <span style="color:var(--amarelo)">Warning</span> /
+      <span style="color:var(--vermelho)">Critical</span>), última replicação e MB pendentes.</td></tr>
+      <tr><td class="centro"><strong>2</strong></td><td><strong>Dashboard HTML</strong> — cards de totais, topologia
+      primário → replica → estendido (host local destacado), tabela completa por VM (modo, estado, saúde,
+      última replicação com "há quanto tempo", tamanho médio/pendente, latência, frequência, servidor par,
+      autenticação, relação), configuração do servidor replica, alerta de expiração do certificado e últimos
+      eventos de erro/aviso. Salvo como <code>Dashboard_Replica_AAAAMMDD_HHMMSS.html</code> e aberto no navegador.</td></tr>
+      <tr><td class="centro"><strong>3</strong></td><td>Últimos eventos de replicação — erros e avisos do log
+      <code>Microsoft-Windows-Hyper-V-VMMS-Admin</code>.</td></tr>
+      <tr><td class="centro"><strong>4</strong></td><td>Exportar o monitoramento para CSV (Excel/relatórios do cliente).</td></tr>
+      <tr><td class="centro"><strong>5</strong></td><td>Zerar as estatísticas de replicação (por VM ou todas).</td></tr>
+      <tr><td class="centro"><strong>6</strong></td><td>Reexecutar o checklist de pré-requisitos — pós-implantação e troubleshooting.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout c-ok">
+    <span class="titulo">✔ DICA DE ENTREGA DE PROJETO</span>
+    Gere o dashboard ao final da implantação e anexe o HTML à documentação de entrega:
+    ele registra topologia, saúde de cada VM, configuração do servidor e validade do certificado
+    com data e hora da coleta.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="arquivos">
+  <h2><span class="num">09</span> Arquivos gerados pelo script</h2>
+  <p>Tudo fica na <strong>própria pasta do script</strong> — por isso "copiar a pasta" é o mecanismo
+  de transporte entre servidores.</p>
+
+  <div class="arquivo"><span class="icone">🗂️</span><div>
+    <code>Estado_Replica_&lt;HOSTNAME&gt;.json</code>
+    <p>Progresso da implantação deste host (papel, ambiente, topologia, thumbprint, etapas concluídas,
+    reboot pendente). Um arquivo por servidor — copiar a pasta não contamina o estado do outro host.
+    A senha do PFX <strong>nunca</strong> é gravada aqui.</p>
+  </div></div>
+  <div class="arquivo"><span class="icone">🔐</span><div>
+    <code>HyperV_Replica_Cert.pfx</code>
+    <p>Certificado <strong>do host</strong> com chave privada, protegido pela senha definida no primário.
+    Necessário para preparar o secundário/estendido em HTTPS. Trate como material sensível.</p>
+  </div></div>
+  <div class="arquivo"><span class="icone">📜</span><div>
+    <code>HyperV_Replica_RootCA.cer</code>
+    <p><strong>CA raiz</strong> (parte pública, sem chave privada) — instalada em Autoridades de
+    Certificação Raiz Confiáveis em todos os hosts. Sem ela o certificado do host não encadeia
+    e a replicação é recusada.</p>
+  </div></div>
+  <div class="arquivo"><span class="icone">📊</span><div>
+    <code>Dashboard_Replica_AAAAMMDD_HHMMSS.html</code> · <code>Replica_Monitor_AAAAMMDD_HHMMSS.csv</code>
+    <p>Relatórios do Menu 3, com carimbo de data/hora — histórico natural das coletas.</p>
+  </div></div>
+  <div class="arquivo"><span class="icone">🧾</span><div>
+    <code>Logs\Replica_&lt;Operação&gt;_AAAAMMDD_HHMMSS.log</code>
+    <p>Transcript completo das operações que alteram o ambiente (preparação, habilitar replicação,
+    failovers) — evidência de campo para a documentação do projeto.</p>
+  </div></div>
+</section>
+
+<!-- ============================================================ -->
+<section id="problemas">
+  <h2><span class="num">10</span> Solução de problemas</h2>
+  <div class="tabela-wrap">
+  <table>
+    <thead><tr><th>Sintoma</th><th>Causa provável</th><th>Ação</th></tr></thead>
+    <tbody>
+      <tr><td>Checklist: porta 443/80 inalcançável no par</td>
+          <td>Firewall intermediário, par ainda não preparado, ou regra listener desabilitada no destino</td>
+          <td>Conclua o Menu 1 no outro servidor; confira firewalls de rede entre os sites; a regra
+          <code>Hyper-V Replica ... Listener (TCP-In)</code> deve estar habilitada <strong>no host que recebe</strong>.</td></tr>
+      <tr><td>Erro de autenticação ao habilitar a replicação (HTTPS)</td>
+          <td>SAN do certificado não contém o FQDN usado, CA raiz ausente da raiz confiável, ou revogação habilitada</td>
+          <td>Use <strong>exatamente</strong> o FQDN cadastrado na topologia; rode o checklist (Menu 3 → 6) nos dois
+          hosts — ele valida cadeia, SAN, raiz e o valor <code>DisableCertRevocationCheck</code>.</td></tr>
+      <tr><td><code>0x80092007</code> — "O certificado especificado é autoassinado"</td>
+          <td>Certificado com emissor = requerente (é a própria raiz)</td>
+          <td>Regenere a cadeia no primário (Menu 1 → etapa 10): o script cria uma CA raiz e emite o
+          certificado do host a partir dela. Confira no MMC que <em>Emitido por</em> mostra
+          <code>Hyper-V Replica Root CA</code>, e não o FQDN do host.</td></tr>
+      <tr><td><code>0x800B0109</code> — "a cadeia terminou em um certificado raiz que não é confiável"</td>
+          <td>A CA raiz (<code>Hyper-V Replica Root CA</code>) não está em <em>Autoridades de Certificação
+          Raiz Confiáveis</em> da máquina local. O certificado do host está correto — falta apenas a raiz
+          que o assinou.</td>
+          <td>Reinstale a raiz a partir do <code>.cer</code> da pasta do script e repita a etapa:
+          <code>Import-Certificate -FilePath .\HyperV_Replica_RootCA.cer -CertStoreLocation Cert:\LocalMachine\Root</code>.
+          A partir da v1.0.1 a etapa 10 detecta e reinstala isso sozinha, e o checklist
+          (Menu 3 → 6) traz o item <em>"CA raiz em Autoridades Raiz Confiáveis"</em>.</td></tr>
+      <tr><td>FQDN do par não resolve (workgroup)</td>
+          <td>Entrada ausente no arquivo hosts ou sufixo DNS não aplicado</td>
+          <td>Reexecute o Menu 1 (etapa 7 é idempotente) ou confira
+          <code>C:\Windows\System32\drivers\etc\hosts</code> — as entradas do script têm o marcador
+          <code># HyperV-Replica</code>.</td></tr>
+      <tr><td>Saúde <span style="color:var(--vermelho)">Critical</span> com replicação parada</td>
+          <td>Destino sem espaço, rede indisponível por longo período, ou VM precisa de ressincronização</td>
+          <td>Veja os eventos (Menu 3 → 3); libere espaço/rede; retome com Menu 2 → 9
+          (o Hyper-V solicita <em>resynchronize</em> quando necessário).</td></tr>
+      <tr><td>Saúde <span style="color:var(--amarelo)">Warning</span> após failover</td>
+          <td>Direção da replicação não configurada (esperado após não planejado)</td>
+          <td>Siga o roteiro de reversão impresso pelo script (seção 07).</td></tr>
+      <tr><td><code>Get-WindowsFeature</code> não existe</td>
+          <td>Script executado em Windows client</td>
+          <td>O Hyper-V Replica só existe em Windows Server — use um host suportado.</td></tr>
+      <tr><td>Acentos corrompidos no console (ex.: <code>CriaÃ§Ã£o</code>)</td>
+          <td>Arquivo salvo sem BOM (UTF-8 lido como ANSI pelo PowerShell 5.1)</td>
+          <td>Garanta que o <code>.ps1</code> está em UTF-8 <strong>com BOM</strong> — padrão deste repositório.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="referencias">
+  <h2><span class="num">11</span> Referências oficiais (Microsoft Learn)</h2>
+  <ul>
+    <li><a style="color:var(--cyan)" href="https://learn.microsoft.com/windows-server/virtualization/hyper-v/replication-overview">Hyper-V Replica — visão geral</a></li>
+    <li><a style="color:var(--cyan)" href="https://learn.microsoft.com/windows-server/virtualization/hyper-v/configure-replication-single-host">Habilitar o Hyper-V Replica em host único</a> (pré-requisitos de certificado e firewall)</li>
+    <li><a style="color:var(--cyan)" href="https://learn.microsoft.com/windows-server/virtualization/hyper-v/replication-virtual-machines">Replicar uma máquina virtual</a></li>
+    <li><a style="color:var(--cyan)" href="https://learn.microsoft.com/windows-server/virtualization/hyper-v/replication-failover">Failover de uma VM replicada</a></li>
+    <li><a style="color:var(--cyan)" href="https://learn.microsoft.com/powershell/module/hyper-v/set-vmreplicationserver">Set-VMReplicationServer</a> ·
+        <a style="color:var(--cyan)" href="https://learn.microsoft.com/powershell/module/hyper-v/enable-vmreplication">Enable-VMReplication</a> ·
+        <a style="color:var(--cyan)" href="https://learn.microsoft.com/powershell/module/hyper-v/start-vmfailover">Start-VMFailover</a> ·
+        <a style="color:var(--cyan)" href="https://learn.microsoft.com/powershell/module/hyper-v/measure-vmreplication">Measure-VMReplication</a></li>
+    <li><a style="color:var(--cyan)" href="https://learn.microsoft.com/troubleshoot/windows-server/virtualization/feature-performance-optimization-hyper-v-replica">KB 2767928 — registros do Hyper-V Replica</a> (<code>DisableCertRevocationCheck</code>)</li>
+    <li><a style="color:var(--cyan)" href="https://learn.microsoft.com/troubleshoot/windows-server/virtualization/hyper-v-replica-troubleshooting-guide">Guia oficial de troubleshooting do Hyper-V Replica</a></li>
+  </ul>
+</section>
+
+</main>
+
+<footer>
+  <p><span class="prompt">PS C:\&gt;</span> Manual do <strong>Automatiza_Hyper-v_Replica.ps1</strong> v1.0</p>
+  <p>Fagner Nascimento — Especialista Microsoft Datacenter · Repositório Scripts_Powershell</p>
+</footer>
+
+</body>
+</html>
