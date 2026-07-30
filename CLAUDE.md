@@ -59,7 +59,17 @@ VLANs, não acrescenta).
   virtuais (Externo/Interno/Privado), criação de switch NAT (internet para VMs
   via WinNAT), listagem e remoção com limpeza do NAT associado.
 - `Automariza_Criacao_Vms_no_Hyperv.ps1` — criação de VMs no Hyper-V.
-- `Automariza_Criacao_Vms_no_Hyperv_Interativo.ps1` — versão interativa da criação de VMs.
+- `Automariza_Criacao_Vms_no_Hyperv_Interativo.ps1` — versão interativa da criação de VMs
+  (com opção de Virtualização Aninhada e MAC Spoofing).
+- `Automatiza_Hyper-v_Replica.ps1` — implantação e gestão completa do Hyper-V
+  Replica: preparação do servidor (domínio/workgroup, certificado autoassinado
+  HTTPS, firewall, instalação da função com resume pós-reboot via
+  `Estado_Replica_<HOST>.json`), administração (habilitar replicação, failover
+  de teste/planejado/não planejado, replicação estendida) e monitoramento
+  (dashboard HTML, eventos VMMS, CSV). Atenção: os nomes REAIS das propriedades
+  de `Get-VMReplication` são `PrimaryServerName`/`ReplicaServerName`/
+  `ReplicationFrequencySec`/`ReplicationRelationshipType` (os cabeçalhos da
+  tabela do cmdlet são abreviações, não os nomes das propriedades).
 - `Inventario_de_Maquinas_Virtuais.ps1` — inventário de VMs com geração de relatório HTML.
 - `Script Reiniciar Sophos/` — automação de reinício do firewall Sophos.
 - `README.md` — descrição do repositório.
@@ -92,22 +102,89 @@ aspa quebra as strings e dispara erros de parser em cascata (inclusive
 
 - Todos os scripts do repositório usam **UTF-8 com BOM** (bytes iniciais
   `EF BB BF`). Mantenha esse padrão ao criar ou editar qualquer script.
-- Como verificar/corrigir neste ambiente (macOS):
-  - Verificar: `file arquivo.ps1` deve indicar `UTF-8 (with BOM)`; ou
-    `xxd arquivo.ps1 | head -1` deve começar com `efbb bf`.
-  - Adicionar BOM: `printf '\xEF\xBB\xBF' | cat - arquivo.ps1 > tmp && mv tmp arquivo.ps1`
+- Como verificar/corrigir neste ambiente (Windows PowerShell):
+  - Verificar (deve imprimir `EF BB BF`):
+
+    ```powershell
+    $b = [System.IO.File]::ReadAllBytes('arquivo.ps1')
+    ($b[0..2] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+    ```
+
+  - Adicionar BOM sem alterar nenhum caractere do código:
+
+    ```powershell
+    $p = 'arquivo.ps1'
+    $bytes = [System.IO.File]::ReadAllBytes($p)
+    if ($bytes[0] -ne 0xEF) {
+        $novo = New-Object byte[] ($bytes.Length + 3)
+        $novo[0] = 0xEF; $novo[1] = 0xBB; $novo[2] = 0xBF
+        [Array]::Copy($bytes, 0, $novo, 3, $bytes.Length)
+        [System.IO.File]::WriteAllBytes($p, $novo)
+    }
+    ```
+
 - Ao terminar de criar/editar um `.ps1`, **confirme que o BOM está presente**
   antes de considerar a tarefa concluída.
 
+## Ambiente de trabalho
+
+Este projeto é trabalhado **exclusivamente neste ambiente**:
+
+- **Windows 11 Pro for Workstations**, com **Windows PowerShell 5.1**.
+- **Hyper-V instalado e ativo** (módulo `Hyper-V` 2.0.0.0, serviço `vmms` em
+  execução). Os cmdlets `Get-VM`, `Set-VMProcessor`, `Get-VMSwitch` etc. estão
+  todos disponíveis para consulta.
+
+Não presuma macOS/Linux nem ausência de PowerShell — o ambiente é Windows real.
+
 ## Validação de scripts
 
-Os scripts destinam-se a **Windows Server 2019+ com Hyper-V** e dependem de
-cmdlets que não existem no macOS/Linux. Neste ambiente de desenvolvimento
-(macOS, sem PowerShell/Hyper-V):
+Os scripts destinam-se a **Windows Server 2019+ com Hyper-V**. Como o módulo
+Hyper-V está presente aqui, a validação pode ir bem além da sintaxe.
 
-- Faça **validação de sintaxe e revisão de lógica** cuidadosamente.
-- Ao concluir uma alteração, **informe explicitamente que não foi possível
-  executar/testar em host Windows real** e que a validação funcional cabe ao usuário.
+### NUNCA execute os scripts do repositório
+
+**Regra absoluta:** não execute `.\Algum_Script.ps1`, nem trechos dele, nem
+qualquer cmdlet que **crie, altere, inicie, pare ou remova** VMs, switches
+virtuais, VHDX, adaptadores de rede ou regras de NAT.
+
+O Hyper-V desta máquina é o ambiente real do usuário — os scripts criam VMs de
+verdade. A validação funcional (executar o script, criar uma VM de teste,
+conferir o resultado) é **sempre do usuário**, nunca sua.
+
+Na prática, isso proíbe: `New-VM`, `Start-VM`, `Remove-VM`, `Set-VM*`,
+`New-VHD`, `New-VMSwitch`, `Remove-VMSwitch`, `Add-VMNetworkAdapter`,
+`New-NetNat` e equivalentes.
+
+### O que fazer no lugar
+
+- **Verificação de sintaxe** com o parser, sem executar nada:
+
+  ```powershell
+  $err = $null; $tok = $null
+  [System.Management.Automation.Language.Parser]::ParseFile('arquivo.ps1', [ref]$tok, [ref]$err) | Out-Null
+  if ($err.Count -eq 0) { '[OK] 0 erros' } else { $err }
+  ```
+
+- **Confirmar que cmdlets e parâmetros existem** de verdade no módulo instalado
+  — isto é leitura de metadados, não execução, e é seguro:
+
+  ```powershell
+  (Get-Command Set-VMProcessor).Parameters.ContainsKey('ExposeVirtualizationExtensions')
+  ```
+
+- **Consultas somente leitura** do estado do host (`Get-VM`, `Get-VMSwitch`,
+  `Get-VMHost`, `Get-CimInstance`) são permitidas quando ajudarem a validar uma
+  suposição — desde que não alterem nada.
+
+- **Testar funções auxiliares isoladamente**, extraindo apenas a função do AST e
+  simulando a entrada do operador (ex.: redefinir `Read-Host` para devolver
+  valores de uma fila). Permite validar reprompt, valores padrão e normalização
+  de entrada sem tocar no Hyper-V.
+
+- Ao concluir, **diga explicitamente o que foi e o que não foi validado**, e
+  lembre que o teste funcional cabe ao usuário.
+
 - Quando útil, ofereça uma **simulação passo a passo** do fluxo interativo
   (entradas do usuário + saídas esperadas do script).
 
