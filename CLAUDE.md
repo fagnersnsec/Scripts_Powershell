@@ -70,7 +70,10 @@ VLANs, não acrescenta).
   (`Set-VMKeyProtector -NewLocalKeyProtector` → `Enable-VMTPM`), VLAN em modo
   Access, Geração 1 ou 2, Secure Boot por SO, RAM/vCPU/memória dinâmica
   interativos, `Resize-VHD` opcional, checagem de espaço e integridade da cópia,
-  rollback confirmado em caso de falha e criação de várias VMs em sequência.
+  rollback confirmado em caso de falha e criação de várias VMs em sequência —
+  com **modo rápido** (v2.1) que, a partir da segunda VM, reaproveita toda a
+  configuração anterior e pergunta apenas o nome, revalidando antes se
+  template, switch e ISO ainda existem.
   Atenção: a geração é propriedade da **VM**, não do VHDX — não há como detectar
   pelo arquivo se ele é MBR (Gen 1) ou GPT/UEFI (Gen 2), por isso o script
   pergunta; e a VM de Geração 1 já nasce com uma unidade de DVD na IDE 1:0.

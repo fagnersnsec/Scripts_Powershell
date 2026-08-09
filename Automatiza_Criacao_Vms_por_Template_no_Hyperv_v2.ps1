@@ -30,6 +30,16 @@
 #           * MAC Address Spoofing
 #           * Secure Boot, ordem de boot, início da VM e resumo final
 #
+#  v2.1 - Modo rapido para VMs em sequencia.
+#         A partir da segunda VM, o script mostra a configuracao da anterior e
+#         oferece reaproveita-la: quando aceito, pergunta APENAS o nome da nova
+#         VM e reusa template, switch, VLAN, memoria, vCPU, geracao, TPM e todo
+#         o resto. Recusando, o assistente completo roda normalmente.
+#         O resumo e a confirmacao (S/N) continuam sendo exibidos nos dois
+#         caminhos - nada e criado sem o operador conferir.
+#         Antes de reaproveitar, o script revalida o que pode ter mudado desde
+#         a VM anterior: existencia do template, do switch virtual e da ISO.
+#
 #  Referências oficiais consultadas:
 #    Geração 1 x 2 / VHDX pré-construído:
 #      https://learn.microsoft.com/windows-server/virtualization/hyper-v/plan/should-i-create-a-generation-1-or-2-virtual-machine-in-hyper-v
@@ -1200,6 +1210,109 @@ function Show-ResumoConfiguracao {
 
 
 # ============================================================
+#  MODO RÁPIDO - reaproveitar a configuração da VM anterior
+# ============================================================
+function Show-ConfiguracaoAnterior {
+    <#
+        Resumo compacto da última VM criada, para o operador decidir se quer
+        repetir a mesma configuração mudando apenas o nome.
+    #>
+    param([Parameter(Mandatory = $true)][psobject]$Cfg)
+
+    $memoria = if ($Cfg.MemoriaDinamica) {
+        "{0} GB dinamica ({1}-{2} GB)" -f $Cfg.MemoriaGB, $Cfg.MemoriaMinGB, $Cfg.MemoriaMaxGB
+    } else {
+        "{0} GB fixa" -f $Cfg.MemoriaGB
+    }
+
+    $rede = $Cfg.SwitchName
+    if ($Cfg.HabilitarVlan) { $rede += ("  |  VLAN {0}" -f $Cfg.VlanId) }
+    if ($Cfg.EnableMacSpoofing) { $rede += '  |  MAC Spoofing ON' }
+
+    $seguranca = "Geracao {0}" -f $Cfg.Geracao
+    if ($Cfg.Geracao -eq 2) {
+        $seguranca += if ($Cfg.SecureBoot -eq 'On') { "  |  Secure Boot {0}" -f $Cfg.SecureBootTemplate } else { '  |  Secure Boot OFF' }
+        if ($Cfg.HabilitarTPM) { $seguranca += '  |  vTPM ON' }
+    }
+
+    $extras = @()
+    if ($Cfg.EnableNested)  { $extras += 'Nested' }
+    if ($Cfg.ExpandirDisco) { $extras += ("disco {0} GB" -f $Cfg.NovoTamanhoGB) }
+    if ($Cfg.AnexarISO)     { $extras += ("ISO {0}" -f (Split-Path -Leaf $Cfg.ISOPath)) }
+    if ($Cfg.DesabilitarCheckpoints) { $extras += 'sem checkpoints automaticos' }
+    if ($Cfg.IniciarVM)     { $extras += 'inicia ao final' }
+
+    Show-Secao ("Configuracao da VM anterior ({0})" -f $Cfg.VMName)
+    Write-Host ("    Template.......: {0}" -f $Cfg.Template.Nome)
+    Write-Host ("    Memoria / vCPU.: {0}  |  {1} vCPUs" -f $memoria, $Cfg.vCPU)
+    Write-Host ("    Rede...........: {0}" -f $rede)
+    Write-Host ("    Seguranca......: {0}" -f $seguranca)
+    if ($extras.Count -gt 0) {
+        Write-Host ("    Extras.........: {0}" -f ($extras -join '  |  '))
+    }
+    Write-Host ""
+}
+
+function Copy-ConfiguracaoVM {
+    <#
+        Clona a configuração de uma VM já criada, trocando apenas o nome e os
+        caminhos derivados dele.
+
+        Não basta copiar o objeto: entre uma VM e outra o operador pode ter
+        movido o template, removido o switch virtual ou desmontado o
+        compartilhamento das ISOs. Reaproveitar às cegas faria a criação falhar
+        lá na frente, depois de a cópia do disco já ter começado. Por isso tudo
+        o que é caminho ou recurso externo é revalidado aqui.
+
+        Devolve $null quando um pré-requisito essencial não existe mais - nesse
+        caso o chamador cai no assistente completo.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Base,
+        [Parameter(Mandatory = $true)][string]$NovoNome
+    )
+
+    if (-not (Test-Path -LiteralPath $Base.Template.Caminho -PathType Leaf)) {
+        Write-Status ERRO ("O template '{0}' não está mais acessível." -f $Base.Template.Caminho)
+        return $null
+    }
+
+    if (-not (Get-VMSwitch -Name $Base.SwitchName -ErrorAction SilentlyContinue)) {
+        Write-Status ERRO ("O switch virtual '{0}' não existe mais neste host." -f $Base.SwitchName)
+        return $null
+    }
+
+    # Cópia rasa basta: só trocamos valores escalares. Template é clonado à
+    # parte porque o tamanho do arquivo é atualizado abaixo.
+    $novo = $Base.PSObject.Copy()
+
+    $novo.VMName      = $NovoNome
+    $novo.PastaVM     = Join-Path $Base.VMPath $NovoNome
+    $novo.PastaDiscos = Join-Path $novo.PastaVM 'Virtual Hard Disks'
+    $novo.VHDXDestino = Join-Path $novo.PastaDiscos ("{0}.vhdx" -f $NovoNome)
+
+    # Se o template foi substituído por uma versão mais nova, a checagem de
+    # espaço livre precisa do tamanho atual, não do que valia na VM anterior.
+    $novo.Template = $Base.Template.PSObject.Copy()
+    $arquivoAtual  = Get-Item -LiteralPath $Base.Template.Caminho
+    if ($arquivoAtual.Length -ne $novo.Template.TamanhoArquivo) {
+        Write-Status INFO ("O template mudou de tamanho desde a última VM: {0} -> {1}" -f `
+                            (Format-Tamanho $novo.Template.TamanhoArquivo), (Format-Tamanho $arquivoAtual.Length))
+        $novo.Template.TamanhoArquivo = [long]$arquivoAtual.Length
+    }
+
+    if ($novo.AnexarISO -and -not (Test-Path -LiteralPath $novo.ISOPath -PathType Leaf)) {
+        Write-Status AVISO ("A ISO '{0}' não está mais acessível." -f $novo.ISOPath)
+        Write-Status INFO  'A VM será criada sem mídia adicional.'
+        $novo.AnexarISO = $false
+        $novo.ISOPath   = ''
+    }
+
+    return $novo
+}
+
+
+# ============================================================
 #  EXECUÇÃO - cria a VM de fato
 # ============================================================
 function Invoke-CriacaoVM {
@@ -1779,16 +1892,39 @@ Write-Status OK ("Templates: {0}" -f $TemplateDir)
 Write-Status OK ("VMs......: {0}" -f $VMPath)
 
 # ---------- Laço principal: cria quantas VMs o operador quiser ----------
-$criadas = @()
+$criadas   = @()
+$ultimaCfg = $null
 
 do {
     Show-Header 'ASSISTENTE DE CRIACAO DE MAQUINA VIRTUAL'
 
-    $cfg = Read-ConfiguracaoVM -TemplateDir $TemplateDir `
-                               -VMPath      $VMPath `
-                               -ISODir      $ISODir `
-                               -Padroes     $Padroes `
-                               -InfoHost    $InfoHost
+    $cfg = $null
+
+    # A partir da segunda VM, oferece repetir tudo o que já foi respondido.
+    # Útil para subir um laboratório inteiro do mesmo template: só o nome muda.
+    if ($ultimaCfg) {
+        Show-ConfiguracaoAnterior -Cfg $ultimaCfg
+
+        if (Read-Confirmacao -Pergunta 'Reaproveitar esta configuracao e mudar so o nome?' -Padrao 'S') {
+            Show-Secao 'Identificação da Máquina Virtual'
+            $novoNome = Read-NomeVM
+
+            $cfg = Copy-ConfiguracaoVM -Base $ultimaCfg -NovoNome $novoNome
+
+            if ($null -eq $cfg) {
+                Write-Status AVISO 'Não foi possível reaproveitar a configuração anterior.'
+                Write-Status INFO  'Abrindo o assistente completo.'
+            }
+        }
+    }
+
+    if ($null -eq $cfg) {
+        $cfg = Read-ConfiguracaoVM -TemplateDir $TemplateDir `
+                                   -VMPath      $VMPath `
+                                   -ISODir      $ISODir `
+                                   -Padroes     $Padroes `
+                                   -InfoHost    $InfoHost
+    }
 
     if ($null -eq $cfg) {
         Write-Host ""
@@ -1812,7 +1948,11 @@ do {
                 Write-Status AVISO ("A VM foi criada, mas o resumo final falhou: {0}" -f $_.Exception.Message)
                 Write-Status INFO  ("Consulte com: Get-VM -Name '{0}' | Format-List *" -f $cfg.VMName)
             }
-            $criadas += $cfg.VMName
+            $criadas  += $cfg.VMName
+
+            # Só uma criação bem-sucedida vira base para o modo rápido: repetir
+            # uma configuração que acabou de falhar apenas repetiria a falha.
+            $ultimaCfg = $cfg
         }
         else {
             Write-Host ""
