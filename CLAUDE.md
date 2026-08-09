@@ -61,6 +61,19 @@ VLANs, não acrescenta).
 - `Automariza_Criacao_Vms_no_Hyperv.ps1` — criação de VMs no Hyper-V.
 - `Automariza_Criacao_Vms_no_Hyperv_Interativo.ps1` — versão interativa da criação de VMs
   (com opção de Virtualização Aninhada e MAC Spoofing).
+- `Automatiza_Criacao_Vms_por_Template_no_Hyperv_v2.ps1` — v2 do script acima: cria
+  VMs a partir de **templates `.vhdx`** em vez de instalar por ISO. Lista os
+  templates do diretório, **copia** o disco escolhido para a pasta da VM com
+  barra de progresso (`FileStream` em blocos + `\r`, com MB/s e ETA — `Copy-Item`
+  não expõe progresso), renomeia para `<NomeDaVM>.vhdx` e anexa como disco de
+  boot (o template nunca é usado nem alterado). Inclui vTPM
+  (`Set-VMKeyProtector -NewLocalKeyProtector` → `Enable-VMTPM`), VLAN em modo
+  Access, Geração 1 ou 2, Secure Boot por SO, RAM/vCPU/memória dinâmica
+  interativos, `Resize-VHD` opcional, checagem de espaço e integridade da cópia,
+  rollback confirmado em caso de falha e criação de várias VMs em sequência.
+  Atenção: a geração é propriedade da **VM**, não do VHDX — não há como detectar
+  pelo arquivo se ele é MBR (Gen 1) ou GPT/UEFI (Gen 2), por isso o script
+  pergunta; e a VM de Geração 1 já nasce com uma unidade de DVD na IDE 1:0.
 - `Automatiza_Hyper-v_Replica.ps1` — implantação e gestão completa do Hyper-V
   Replica: preparação do servidor (domínio/workgroup, certificado autoassinado
   HTTPS, firewall, instalação da função com resume pós-reboot via
